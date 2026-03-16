@@ -187,13 +187,31 @@ const AudioEngine = (() => {
       return elapsed < window || (spBeat - elapsed) < window;
     },
     // Sound effects for game events
-    playAttackSound(onBeat) {
+    // Attack pitch ladder — E minor pentatonic, tied to score tiers
+    // On-beat: tier note. Off-beat: tier note + one semitone (dissonant, feels "wrong")
+    getAttackFreq(score, onBeat) {
+      // E minor pentatonic: E3 G3 A3 B3 E4 (MIDI 52 55 57 59 64)
+      const TIERS = [
+        { threshold: 0,     midi: 52 }, // E3
+        { threshold: 500,   midi: 55 }, // G3
+        { threshold: 2000,  midi: 57 }, // A3
+        { threshold: 5000,  midi: 59 }, // B3
+        { threshold: 10000, midi: 64 }, // E4
+      ];
+      let midi = TIERS[0].midi;
+      for (const t of TIERS) { if (score >= t.threshold) midi = t.midi; }
+      // Off-beat: +1 semitone (deliberate dissonance)
+      if (!onBeat) midi += 1;
+      return 440 * Math.pow(2, (midi - 69) / 12);
+    },
+    playAttackSound(onBeat, score = 0) {
       if (!ctx) return;
+      const freq = this.getAttackFreq(score, onBeat);
       const osc = ctx.createOscillator(), g = ctx.createGain();
       osc.type = 'square';
-      osc.frequency.value = onBeat ? 880 : 440;
+      osc.frequency.value = freq;
       osc.connect(g); g.connect(ctx.destination);
-      g.gain.setValueAtTime(0.3, ctx.currentTime);
+      g.gain.setValueAtTime(onBeat ? 0.3 : 0.2, ctx.currentTime);
       g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08);
       osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.09);
     },
@@ -316,7 +334,7 @@ function doAttack() {
   const onBeat = AudioEngine.isOnBeat();
   const dmg = onBeat ? 25 : 12;
   player.attackCooldown = 0.18;
-  AudioEngine.playAttackSound(onBeat);
+  AudioEngine.playAttackSound(onBeat, score);
   attackRings.push({ x: player.x, y: player.y, r: player.radius, maxR: 80, alpha: 1, onBeat, damage: dmg, hit: new Set() });
   combo++;
   if (combo > maxCombo) maxCombo = combo;
