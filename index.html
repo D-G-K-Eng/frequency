@@ -352,6 +352,91 @@ const AudioEngine = (() => {
     },
 
     get currentBeat() { return currentBeat; },
+
+    // THE SHAFT — super weapon audio suite
+    // Call playShaftFire() on launch, playShaftShockwave() on screen exit
+
+    playShaftFire() {
+      if (!ctx) return;
+      const t = ctx.currentTime;
+      // The BWOOONG: sine bass hit 80→120Hz with heavy distortion
+      const osc = ctx.createOscillator();
+      const wshape = ctx.createWaveShaper();
+      const g = ctx.createGain();
+      const curve = new Float32Array(512);
+      for (let i = 0; i < 512; i++) {
+        const x = (i * 2) / 512 - 1;
+        curve[i] = (Math.PI + 80) * x / (Math.PI + 80 * Math.abs(x));
+      }
+      wshape.curve = curve;
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(80, t);
+      osc.frequency.exponentialRampToValueAtTime(120, t + 0.4);
+      osc.connect(wshape); wshape.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.8, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
+      osc.start(t); osc.stop(t + 0.65);
+      // The "WEE" -- high sawtooth, delayed 0.1s, brief
+      const wee = ctx.createOscillator(), wg = ctx.createGain();
+      wee.type = 'sawtooth';
+      wee.frequency.setValueAtTime(600, t + 0.1);
+      wee.frequency.exponentialRampToValueAtTime(2400, t + 0.45);
+      wee.connect(wg); wg.connect(ctx.destination);
+      wg.gain.setValueAtTime(0.15, t + 0.1);
+      wg.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+      wee.start(t + 0.1); wee.stop(t + 0.5);
+    },
+
+    // Whoosh loop: call start/stop around the shaft's flight duration
+    // Returns a stopFn — call it when the shaft exits the screen
+    playShaftFlight() {
+      if (!ctx) return () => {};
+      const t = ctx.currentTime;
+      const sz = ctx.sampleRate;
+      const buf = ctx.createBuffer(1, sz, sz);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < sz; i++) d[i] = Math.random() * 2 - 1;
+      const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+      const flt = ctx.createBiquadFilter(); flt.type = 'bandpass';
+      flt.frequency.setValueAtTime(400, t);
+      flt.frequency.linearRampToValueAtTime(1200, t + 3); // pitch up slowly
+      flt.Q.value = 2;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.3, t);
+      src.connect(flt); flt.connect(g); g.connect(ctx.destination);
+      src.start(t);
+      return () => {
+        if (!ctx) return;
+        const now = ctx.currentTime;
+        g.gain.setValueAtTime(g.gain.value, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+        src.stop(now + 0.11);
+      };
+    },
+
+    playShaftShockwave() {
+      if (!ctx) return;
+      const t = ctx.currentTime;
+      // 3-note descending arpeggio, 3x loud
+      [64, 59, 52].forEach((midi, i) => {
+        const osc = ctx.createOscillator(), g = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+        const onset = t + i * 0.07;
+        osc.connect(g); g.connect(ctx.destination);
+        g.gain.setValueAtTime(0.0, onset);
+        g.gain.linearRampToValueAtTime(0.9, onset + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.001, onset + 0.25);
+        osc.start(onset); osc.stop(onset + 0.26);
+      });
+      // Sub boom underneath
+      const sub = ctx.createOscillator(), sg = ctx.createGain();
+      sub.type = 'sine'; sub.frequency.value = 55;
+      sub.connect(sg); sg.connect(ctx.destination);
+      sg.gain.setValueAtTime(1.0, t);
+      sg.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+      sub.start(t); sub.stop(t + 0.51);
+    },
   };
 })();
 
