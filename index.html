@@ -2145,18 +2145,20 @@ function drawBackground(time) {
   });
   gfx.globalAlpha = 1;
 
-  // Beat-reactive border glow
-  const bp = AudioEngine.getBeatProgress();
-  const borderAlpha = (1 - bp) * 0.4;
-  if (borderAlpha > 0.05) {
-    gfx.save();
-    gfx.globalAlpha = borderAlpha;
-    gfx.strokeStyle = '#00ffff';
-    gfx.lineWidth = 3;
-    gfx.shadowColor = '#00ffff';
-    gfx.shadowBlur = 20;
-    gfx.strokeRect(2, 2, W - 4, H - 4);
-    gfx.restore();
+  // Beat-reactive border glow (gameplay only)
+  if (G.started && !G.over) {
+    const bp = AudioEngine.getBeatProgress();
+    const borderAlpha = (1 - bp) * 0.4;
+    if (borderAlpha > 0.05) {
+      gfx.save();
+      gfx.globalAlpha = borderAlpha;
+      gfx.strokeStyle = '#00ffff';
+      gfx.lineWidth = 3;
+      gfx.shadowColor = '#00ffff';
+      gfx.shadowBlur = 20;
+      gfx.strokeRect(2, 2, W - 4, H - 4);
+      gfx.restore();
+    }
   }
 }
 
@@ -2274,7 +2276,14 @@ function loop(ts = 0) {
 // ============================================================
 // GAME_W / GAME_H declared in resize() block above
 
+const _isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
 function applyCanvasScale() {
+  if (!_isTouchDevice) {
+    // Desktop: canvas fills window, no transform needed
+    canvas._scale = 1;
+    return;
+  }
   const scaleX = window.innerWidth  / GAME_W;
   const scaleY = window.innerHeight / GAME_H;
   const scale  = Math.min(scaleX, scaleY);
