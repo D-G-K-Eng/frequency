@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>FREQUENCY v3</title>
+<title>FREQUENCY v4</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
@@ -44,7 +44,7 @@ canvas { display: block; }
 <div id="overlay">
   <div id="start-screen" class="screen">
     <h1>FREQUENCY</h1>
-    <div class="version">V3 — SPRITE EDITION</div>
+    <div class="version">V4 — BEAT ESCALATION</div>
     <div class="controls">
       <b>MOVE</b> — Mouse &nbsp;|&nbsp; <b>FIRE</b> — Click / Space<br>
       <b>WEAPON</b> — Q / E / Scroll Wheel<br>
@@ -463,7 +463,7 @@ const G = {
   multiplierBeats: 0, overclockBeats: 0,
   // Wave state
   waveEnemies: 0, waveKilled: 0, bossActive: false,
-  waveTransition: false, waveTimer: 0,
+  waveTransition: false, waveTimer: 0, bpmNotify: null,
   // Weapon: 0=PlasmaRing, 1=LaserBurst
   weapon: 0, weaponUnlocked: [true, false],
   // Beat-flash for HUD
@@ -901,12 +901,72 @@ function createBoss(x, y) {
   };
 }
 
+function createSniper(x, y) {
+  return {
+    tier: 'sniper', x, y,
+    hp: 120, maxHp: 120,
+    speed: 40, size: 22,
+    score: 400, color: '#4488ff',
+    spriteName: 'enemyBlue1',  // canvas fallback if not in atlas
+    dead: false, deathTimer: 0,
+    angle: 0, ringAngle: 0,
+    hitFlash: 0, phaseTime: 0,
+    beatsUntilFire: 4,
+    warningShown: false,
+    keepDistMin: 220,
+  };
+}
+
+function createSwarmUnit(cx, cy) {
+  return {
+    tier: 'swarm',
+    x: cx + (Math.random() - 0.5) * 50,
+    y: cy + (Math.random() - 0.5) * 50,
+    hp: 1, maxHp: 1,
+    speed: 260, size: 8,
+    score: 50, color: '#ff44cc',
+    spriteName: null,
+    dead: false, deathTimer: 0,
+    angle: 0, ringAngle: 0,
+    hitFlash: 0, phaseTime: 0,
+    driftX: (Math.random() - 0.5) * 50,
+    driftY: (Math.random() - 0.5) * 50,
+  };
+}
+
+function spawnSwarmGroup(cx, cy) {
+  const units = [];
+  for (let i = 0; i < 8; i++) units.push(createSwarmUnit(cx, cy));
+  return units;
+}
+
+function fireSniperShot(sniper, p) {
+  const dx = p.x - sniper.x, dy = p.y - sniper.y;
+  const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+  const speed = 220;
+  G.eProjectiles.push({
+    x: sniper.x, y: sniper.y,
+    vx: (dx / dist) * speed, vy: (dy / dist) * speed,
+    r: 5, life: 4,
+    color: '#ff6600',
+    damage: 15,
+    isSniper: true,
+  });
+}
+
 function spawnWave() {
   G.enemies = [];
   G.projectiles = [];
   G.powerups = [];
   G.waveKilled = 0;
   G.waveTransition = false;
+
+  // BPM ramp every 3 waves, max 160
+  if (G.wave % 3 === 0) {
+    const newBpm = Math.min(160, AudioEngine.getBPM() + 8);
+    AudioEngine.setBPM(newBpm);
+    G.bpmNotify = { value: newBpm, timer: 2.5 };
+  }
 
   const isBossWave = G.wave % 5 === 0;
   if (isBossWave) {
@@ -927,6 +987,22 @@ function spawnWave() {
     const y = -60 - Math.random() * 200;
     G.enemies.push(createEnemy(tier, x, y));
   }
+
+  // Sniper: spawns wave 3+, 1 per wave
+  if (G.wave >= 3) {
+    const sx = (W * 0.15) + Math.random() * (W * 0.7);
+    G.enemies.push(createSniper(sx, -60 - Math.random() * 100));
+    G.waveEnemies++;
+  }
+
+  // Swarm: spawns wave 4+, 1 group of 8 per wave
+  if (G.wave >= 4) {
+    const swarmX = (W * 0.15) + Math.random() * (W * 0.7);
+    const swarmY = -60 - Math.random() * 100;
+    const group = spawnSwarmGroup(swarmX, swarmY);
+    group.forEach(s => G.enemies.push(s));
+    G.waveEnemies += group.length;
+  }
 }
 
 function updateEnemies(dt, time) {
@@ -942,6 +1018,30 @@ function updateEnemies(dt, time) {
 
     if (e.tier === 'boss') {
       updateBoss(e, dt, p);
+    } else if (e.tier === 'sniper') {
+      // Sniper: keep 220px+ from player, face player
+      const dx = p.x - e.x, dy = p.y - e.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      if (dist < e.keepDistMin) {
+        // Back away
+        e.x -= (dx / dist) * e.speed * dt;
+        e.y -= (dy / dist) * e.speed * dt;
+      } else if (dist > e.keepDistMin + 100) {
+        // Drift closer slowly
+        e.x += (dx / dist) * e.speed * 0.3 * dt;
+        e.y += (dy / dist) * e.speed * 0.3 * dt;
+      }
+      // Keep on screen
+      e.x = Math.max(e.size, Math.min(W - e.size, e.x));
+      e.y = Math.max(e.size, Math.min(H * 0.7, e.y));
+      e.angle = Math.atan2(dy, dx) + Math.PI / 2;
+    } else if (e.tier === 'swarm') {
+      // Swarm: fast, loose formation with drift
+      const dx = p.x - e.x + e.driftX, dy = p.y - e.y + e.driftY;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      e.x += (dx / dist) * e.speed * dt;
+      e.y += (dy / dist) * e.speed * dt;
+      e.angle = Math.atan2(dy, dx) + Math.PI / 2;
     } else {
       const dx = p.x - e.x, dy = p.y - e.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -1136,6 +1236,8 @@ function drawEnemies() {
       if (e.tier === 1) drawEnemy1(e);
       else if (e.tier === 2) drawEnemy2(e);
       else if (e.tier === 3) drawEnemy3(e);
+      else if (e.tier === 'sniper') drawSniper(e);
+      else if (e.tier === 'swarm') drawSwarm(e);
       else drawBoss(e);
     }
 
@@ -1263,6 +1365,71 @@ function drawEnemy3(e) {
   gfx.fillStyle = 'rgba(220,150,255,0.8)';
   gfx.fill();
 
+  gfx.restore();
+}
+
+function drawSniper(e) {
+  // Narrow diamond shape, blue/white glow
+  gfx.save();
+  gfx.translate(e.x, e.y);
+  // Warning pulse when about to fire
+  if (e.warningShown) {
+    gfx.globalAlpha = 0.5 + Math.sin(Date.now() * 0.02) * 0.5;
+    gfx.beginPath();
+    gfx.arc(0, 0, e.size * 1.8, 0, Math.PI * 2);
+    gfx.strokeStyle = '#ff4400';
+    gfx.lineWidth = 2;
+    gfx.shadowColor = '#ff4400';
+    gfx.shadowBlur = 15;
+    gfx.stroke();
+    gfx.globalAlpha = 1;
+  }
+  // Diamond body
+  const s = e.size;
+  gfx.beginPath();
+  gfx.moveTo(0, -s);          // top
+  gfx.lineTo(s * 0.4, 0);    // right
+  gfx.lineTo(0, s);           // bottom
+  gfx.lineTo(-s * 0.4, 0);   // left
+  gfx.closePath();
+  const grad = gfx.createRadialGradient(0, 0, 0, 0, 0, s);
+  grad.addColorStop(0, '#aaccff');
+  grad.addColorStop(0.5, '#2266ee');
+  grad.addColorStop(1, '#001144');
+  gfx.fillStyle = grad;
+  gfx.shadowColor = '#4488ff';
+  gfx.shadowBlur = 16;
+  gfx.fill();
+  gfx.strokeStyle = '#aaddff';
+  gfx.lineWidth = 1.5;
+  gfx.stroke();
+  // Core glow
+  gfx.beginPath();
+  gfx.arc(0, 0, s * 0.25, 0, Math.PI * 2);
+  gfx.fillStyle = '#ffffff';
+  gfx.shadowBlur = 10;
+  gfx.fill();
+  gfx.restore();
+}
+
+function drawSwarm(e) {
+  // Tiny magenta/pink triangle
+  gfx.save();
+  gfx.translate(e.x, e.y);
+  gfx.rotate(e.angle);
+  const s = e.size;
+  gfx.beginPath();
+  gfx.moveTo(0, -s);
+  gfx.lineTo(-s * 0.7, s * 0.7);
+  gfx.lineTo(s * 0.7, s * 0.7);
+  gfx.closePath();
+  gfx.fillStyle = '#ff44cc';
+  gfx.shadowColor = '#ff44cc';
+  gfx.shadowBlur = 8;
+  gfx.fill();
+  gfx.strokeStyle = '#ffaaee';
+  gfx.lineWidth = 1;
+  gfx.stroke();
   gfx.restore();
 }
 
@@ -1465,6 +1632,9 @@ function checkWaveComplete() {
 }
 
 function updateWave(dt) {
+  if (G.bpmNotify && G.bpmNotify.timer > 0) {
+    G.bpmNotify.timer -= dt;
+  }
   if (!G.waveTransition) return;
   G.waveTimer -= dt;
   if (G.waveTimer <= 0) {
@@ -1538,6 +1708,25 @@ function drawHUD() {
   gfx.font = 'bold 9px Courier New';
   gfx.textAlign = 'center';
   gfx.fillText('BEAT', 34, 37);
+  // BPM display near beat indicator
+  gfx.fillStyle = '#6699bb';
+  gfx.font = '9px Courier New';
+  gfx.textAlign = 'center';
+  gfx.fillText(Math.round(AudioEngine.getBPM()) + ' BPM', 34, 60);
+
+  // BPM ramp notification flash
+  if (G.bpmNotify && G.bpmNotify.timer > 0) {
+    const t = Math.min(1, G.bpmNotify.timer / 1.2);
+    gfx.save();
+    gfx.globalAlpha = t;
+    gfx.fillStyle = '#00ffff';
+    gfx.shadowColor = '#00ffff';
+    gfx.shadowBlur = 20;
+    gfx.font = 'bold 28px Courier New';
+    gfx.textAlign = 'center';
+    gfx.fillText('+ BPM: ' + G.bpmNotify.value, W / 2, H / 2 - 60);
+    gfx.restore();
+  }
 
   // Weapon HUD (bottom right)
   const wx = W - 20, wy = H - 65;
@@ -1671,6 +1860,22 @@ function onBeat(beatIdx) {
   if (G.overclockBeats > 0) G.overclockBeats--;
   // Beat flash
   G.beatFlash = 1;
+
+  // Sniper beat-fire logic
+  G.enemies.forEach(e => {
+    if (e.dead || e.tier !== 'sniper') return;
+    e.beatsUntilFire--;
+    if (e.beatsUntilFire === 1) {
+      // Warning: 1 beat before firing
+      AudioEngine.playWarningSound();
+      e.warningShown = true;
+    }
+    if (e.beatsUntilFire <= 0) {
+      if (G.player) fireSniperShot(e, G.player);
+      e.beatsUntilFire = 4;
+      e.warningShown = false;
+    }
+  });
 }
 
 // ============================================================
@@ -1683,7 +1888,7 @@ function startGame() {
   G.fireCooldown = 0; G.multiplierBeats = 0; G.overclockBeats = 0;
   G.weapon = 0; G.weaponUnlocked = [true, false];
   G.waveTransition = false; G.waveTimer = 0; G.waveKilled = 0; G.waveEnemies = 0; G.bossActive = false;
-  G.beatFlash = 0; G.onBeatFlash = 0;
+  G.beatFlash = 0; G.onBeatFlash = 0; G.bpmNotify = null;
   G.player = createPlayer();
   G.mouse.x = W / 2; G.mouse.y = H * 0.8;
   initStars();
