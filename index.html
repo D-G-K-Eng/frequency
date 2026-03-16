@@ -553,7 +553,7 @@ const G = {
   // Enemy projectiles
   eProjectiles: [],
   // Input
-  mouse: { x: 0, y: 0 }, keys: {}, mouseDown: false,
+  mouse: { x: 0, y: 0 }, keys: {}, mouseDown: false, touchFireQueued: false,
   // Firing
   fireCooldown: 0,
   // Powerup timers (in beats)
@@ -681,6 +681,18 @@ function updatePlayer(dt) {
   p.x = Math.max(m, Math.min(W - m, p.x));
   p.y = Math.max(m, Math.min(H - m, p.y));
 
+  // Touch movement (left joystick overrides mouse-follow on touch devices)
+  const td = Touch.getMoveDelta();
+  if (Touch.isActive() && (Math.abs(td.x) > 10 || Math.abs(td.y) > 10)) {
+    const len = Math.sqrt(td.x * td.x + td.y * td.y);
+    const spd = G.overclockBeats > 0 ? 450 : 300; // touch movement speed px/s
+    p.x += (td.x / len) * spd * dt;
+    p.y += (td.y / len) * spd * dt;
+    // Re-clamp after touch movement
+    p.x = Math.max(m, Math.min(W - m, p.x));
+    p.y = Math.max(m, Math.min(H - m, p.y));
+  }
+
   // Angle toward mouse (rotate ship toward direction of movement)
   const dx = G.mouse.x - p.x, dy = G.mouse.y - p.y;
   if (Math.abs(dx) + Math.abs(dy) > 5) {
@@ -712,6 +724,12 @@ function updatePlayer(dt) {
 
   // Firing
   G.fireCooldown -= dt;
+  // Touch tap-to-fire
+  if (G.touchFireQueued) {
+    G.mouseDown = true;
+    G.touchFireQueued = false;
+  }
+
   const shouldFire = G.mouseDown || G.keys[' '];
   if (shouldFire && G.fireCooldown <= 0) {
     const onBeat = AudioEngine.isOnBeat();
