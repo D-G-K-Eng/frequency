@@ -961,7 +961,7 @@ function fireShaft() {
   const len = Math.sqrt(dx * dx + dy * dy) || 1;
   const vx = (dx / len) * SHAFT_SPEED;
   const vy = (dy / len) * SHAFT_SPEED;
-  const angle = Math.atan2(dy, dx) - Math.PI / 2; // rotated so "up" faces travel dir
+  const angle = Math.atan2(dy, dx) + Math.PI / 2; // tip points forward in travel direction
 
   G.shaftProj = { x: p.x, y: p.y, vx, vy, angle, stopFlight: null };
   G.shaftCooldown = SHAFT_COOLDOWN;
@@ -1039,9 +1039,9 @@ function drawShaft() {
 
   // Purple gradient: dark core → bright purple → pink tip
   const grad = gfx.createLinearGradient(0, -h / 2, 0, h / 2);
-  grad.addColorStop(0,   '#ff66ff'); // pink tip (top = leading edge after rotation)
+  grad.addColorStop(0,   '#4a0080'); // dark base (top = trailing after flip)
   grad.addColorStop(0.4, '#cc00ff'); // bright purple
-  grad.addColorStop(1,   '#4a0080'); // dark core
+  grad.addColorStop(1,   '#ff66ff'); // pink tip (bottom = leading edge)
 
   // Rounded rectangle body
   gfx.beginPath();
@@ -1061,8 +1061,8 @@ function drawShaft() {
   // Two bumps near base
   gfx.shadowBlur = 8;
   gfx.fillStyle = '#cc00ff';
-  gfx.beginPath(); gfx.arc(-w / 2 - 4, h * 0.25, 8, 0, Math.PI * 2); gfx.fill();
-  gfx.beginPath(); gfx.arc( w / 2 + 4, h * 0.25, 8, 0, Math.PI * 2); gfx.fill();
+  gfx.beginPath(); gfx.arc(-w / 2 - 4, -h * 0.25, 8, 0, Math.PI * 2); gfx.fill();
+  gfx.beginPath(); gfx.arc( w / 2 + 4, -h * 0.25, 8, 0, Math.PI * 2); gfx.fill();
 
   // Retro scanlines at 30% opacity
   gfx.shadowBlur = 0;
