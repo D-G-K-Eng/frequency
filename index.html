@@ -190,6 +190,102 @@ const AudioEngine = (() => {
       g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
       osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.21);
     },
+    // Laser Burst — sine chirp, fast attack, narrow frequency
+    // On-beat crit: octave up + white noise electrical discharge
+    playLaserSound(onBeat, score = 0) {
+      if (!ctx) return;
+      const baseFreq = this.getAttackFreq(score, onBeat);
+      const t = ctx.currentTime;
+
+      // Chirp: sine wave, fast attack, 40ms decay
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(baseFreq * (onBeat ? 2 : 1), t); // octave up on crit
+      osc.frequency.exponentialRampToValueAtTime(baseFreq * (onBeat ? 2.5 : 1.2), t + 0.04);
+      osc.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(onBeat ? 0.4 : 0.25, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+      osc.start(t); osc.stop(t + 0.05);
+
+      // On-beat: white noise burst (electrical discharge)
+      if (onBeat) {
+        const sz = ctx.sampleRate * 0.03;
+        const buf = ctx.createBuffer(1, sz, ctx.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < sz; i++) d[i] = Math.random() * 2 - 1;
+        const src = ctx.createBufferSource(); src.buffer = buf;
+        const flt = ctx.createBiquadFilter(); flt.type = 'bandpass';
+        flt.frequency.value = 4000; flt.Q.value = 0.3;
+        const ng = ctx.createGain();
+        ng.gain.setValueAtTime(0.2, t);
+        ng.gain.exponentialRampToValueAtTime(0.001, t + 0.03);
+        src.connect(flt); flt.connect(ng); ng.connect(ctx.destination);
+        src.start(t); src.stop(t + 0.03);
+      }
+    },
+
+    // Powerup pickup sounds
+    // type: 'beat_multiplier' | 'shield_overcharge' | 'overclock'
+    playPowerupSound(type) {
+      if (!ctx) return;
+      const t = ctx.currentTime;
+
+      if (type === 'beat_multiplier') {
+        // 3-note ascending arpeggio: E3-G3-B3, fast, bright
+        const notes = [52, 55, 59]; // E3 G3 B3
+        notes.forEach((midi, i) => {
+          const osc = ctx.createOscillator(), g = ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+          const onset = t + i * 0.07;
+          osc.connect(g); g.connect(ctx.destination);
+          g.gain.setValueAtTime(0.0, onset);
+          g.gain.linearRampToValueAtTime(0.3, onset + 0.01);
+          g.gain.exponentialRampToValueAtTime(0.001, onset + 0.12);
+          osc.start(onset); osc.stop(onset + 0.13);
+        });
+
+      } else if (type === 'shield_overcharge') {
+        // Low E major triad: E2-G#2-B2, one shot, brief delay effect
+        const notes = [40, 44, 47]; // E2 G#2 B2
+        notes.forEach((midi, i) => {
+          const osc = ctx.createOscillator(), g = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+          osc.connect(g); g.connect(ctx.destination);
+          g.gain.setValueAtTime(0.25, t);
+          g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+          osc.start(t); osc.stop(t + 0.51);
+          // Delayed echo (simulated reverb)
+          const osc2 = ctx.createOscillator(), g2 = ctx.createGain();
+          osc2.type = 'sine';
+          osc2.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+          osc2.connect(g2); g2.connect(ctx.destination);
+          g2.gain.setValueAtTime(0.1, t + 0.12);
+          g2.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+          osc2.start(t + 0.12); osc2.stop(t + 0.51);
+        });
+
+      } else if (type === 'overclock') {
+        // Fast upward glide on sawtooth, 80ms, slight overdrive
+        const osc = ctx.createOscillator(), g = ctx.createGain();
+        const wshape = ctx.createWaveShaper();
+        const curve = new Float32Array(256);
+        for (let i = 0; i < 256; i++) {
+          const x = (i * 2) / 256 - 1;
+          curve[i] = (Math.PI + 30) * x / (Math.PI + 30 * Math.abs(x));
+        }
+        wshape.curve = curve;
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(200, t);
+        osc.frequency.exponentialRampToValueAtTime(1200, t + 0.08);
+        osc.connect(wshape); wshape.connect(g); g.connect(ctx.destination);
+        g.gain.setValueAtTime(0.3, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+        osc.start(t); osc.stop(t + 0.11);
+      }
+    },
+
     getBPM() { return bpm; },
     setBPM(v) { bpm = Math.max(60, Math.min(200, v)); },
     get currentBeat() { return currentBeat; },
