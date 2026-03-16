@@ -79,6 +79,7 @@ const AudioEngine = (() => {
 
   const SCHEDULE_AHEAD = 0.1;
   const SCHEDULER_MS   = 25;
+  let _beatWindowMs = 100; // adaptive: 100ms desktop, 150ms touch
 
   const PATTERNS = {
     kick:  [1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0],
@@ -210,12 +211,13 @@ const AudioEngine = (() => {
       const elapsed = ctx.currentTime - lastBeatAudioTime;
       return Math.min(1, Math.max(0, elapsed / spBeat));
     },
-    isOnBeat(windowMs = 100) {
+    isOnBeat(windowMs) {
       if (!ctx || !isRunning) return false;
+      const ms = windowMs !== undefined ? windowMs : _beatWindowMs;
       const spBeat = 60 / bpm;
-      const window = windowMs / 1000;
+      const win = ms / 1000;
       const elapsed = ctx.currentTime - lastBeatAudioTime;
-      return elapsed < window || (spBeat - elapsed) < window;
+      return elapsed < win || (spBeat - elapsed) < win;
     },
     playAttackSound(onBeat, score = 0) {
       if (!ctx) return;
@@ -313,9 +315,6 @@ const AudioEngine = (() => {
       g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
       osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.21);
     },
-    getBPM() { return bpm; },
-    setBPM(v) { bpm = Math.max(60, Math.min(200, v)); },
-
     // Smooth BPM ramp over N beats. Call on wave threshold.
     // e.g. AudioEngine.rampBPM(140, 8) — reach 140 BPM over 8 beats
     rampBPM(targetBpm, beatsToRamp = 8) {
@@ -352,6 +351,19 @@ const AudioEngine = (() => {
     },
 
     get currentBeat() { return currentBeat; },
+    getBPM() { return bpm; },
+    setBPM(v) { bpm = Math.max(60, Math.min(200, v)); },
+
+    // Mobile beat window — call with 150 on touch devices
+    setOnBeatWindow(ms) { _beatWindowMs = Math.max(50, Math.min(300, ms)); },
+    getOnBeatWindow()   { return _beatWindowMs; },
+
+    // Auto-detect touch and widen window. Call once at game init.
+    initMobile() {
+      const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+      if (isTouch) _beatWindowMs = 150;
+      return isTouch;
+    },
 
     // THE SHAFT — super weapon audio suite
     // Call playShaftFire() on launch, playShaftShockwave() on screen exit
@@ -2211,6 +2223,7 @@ function loop(ts = 0) {
     drawPowerups();
     drawPlayer();
     drawFloatText();
+    Touch.drawJoysticks(gfx);
     drawShaftLabel();
     drawShaftShockwaveFlash();
     drawHUD();
@@ -2220,13 +2233,212 @@ function loop(ts = 0) {
 }
 
 // ============================================================
+// ============================================================
+// CANVAS SCALING (mobile + responsive)
+// ============================================================
+const GAME_W = 900, GAME_H = 700;
+
+function applyCanvasScale() {
+  const scaleX = window.innerWidth  / GAME_W;
+  const scaleY = window.innerHeight / GAME_H;
+  const scale  = Math.min(scaleX, scaleY);
+  canvas.style.position     = 'absolute';
+  canvas.style.left         = Math.round((window.innerWidth  - GAME_W * scale) / 2) + 'px';
+  canvas.style.top          = Math.round((window.innerHeight - GAME_H * scale) / 2) + 'px';
+  canvas.style.transform    = `scale(${scale})`;
+  canvas.style.transformOrigin = 'top left';
+  canvas._scale = scale;
+}
+
+applyCanvasScale();
+window.addEventListener('resize', applyCanvasScale);
+
+// Convert client coords to canvas game coords
+function clientToGame(cx, cy) {
+  const scale = canvas._scale || 1;
+  const rect  = canvas.getBoundingClientRect();
+  return {
+    x: (cx - rect.left) / scale,
+    y: (cy - rect.top)  / scale,
+  };
+}
+
+// ============================================================
+// TOUCH INPUT LAYER
+// ============================================================
+// Exports to G: G.touch.active, G.touch.left (joystick), G.touch.right (aim)
+// Wiring: game update reads G.touch and translates to G.mouse / movement
+const Touch = (() => {
+  const LEFT_ZONE_FRAC = 0.45; // left 45% of screen = move joystick
+  let leftId = null, rightId = null;
+  let leftBase = { x: 0, y: 0 }, rightBase = { x: 0, y: 0 };
+  let leftDelta = { x: 0, y: 0 }, rightDelta = { x: 0, y: 0 };
+  let active = false;
+
+  function getZone(gx) { return gx < GAME_W * LEFT_ZONE_FRAC ? 'left' : 'right'; }
+
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    active = true;
+    for (const t of e.changedTouches) {
+      const g = clientToGame(t.clientX, t.clientY);
+      if (getZone(g.x) === 'left' && leftId === null) {
+        leftId = t.identifier;
+        leftBase = { x: g.x, y: g.y };
+        leftDelta = { x: 0, y: 0 };
+      } else if (getZone(g.x) === 'right' && rightId === null) {
+        rightId = t.identifier;
+        rightBase = { x: g.x, y: g.y };
+        rightDelta = { x: 0, y: 0 };
+        // Tap on right = fire
+        if (G.started) G.touchFireQueued = true;
+      }
+    }
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      const g = clientToGame(t.clientX, t.clientY);
+      if (t.identifier === leftId) {
+        leftDelta = { x: g.x - leftBase.x, y: g.y - leftBase.y };
+      } else if (t.identifier === rightId) {
+        rightDelta = { x: g.x - rightBase.x, y: g.y - rightBase.y };
+        // Update aim: mouse = right joystick direction from player
+        if (G.player) {
+          const len = Math.sqrt(rightDelta.x * rightDelta.x + rightDelta.y * rightDelta.y);
+          if (len > 8) {
+            G.mouse.x = G.player.x + (rightDelta.x / len) * 200;
+            G.mouse.y = G.player.y + (rightDelta.y / len) * 200;
+          }
+        }
+      }
+    }
+  }, { passive: false });
+
+  function endTouch(id) {
+    if (id === leftId)  { leftId = null;  leftDelta  = { x: 0, y: 0 }; }
+    if (id === rightId) { rightId = null; rightDelta = { x: 0, y: 0 }; }
+  }
+
+  canvas.addEventListener('touchend',    e => { e.preventDefault(); for (const t of e.changedTouches) endTouch(t.identifier); }, { passive: false });
+  canvas.addEventListener('touchcancel', e => { e.preventDefault(); for (const t of e.changedTouches) endTouch(t.identifier); }, { passive: false });
+
+  return {
+    isActive() { return active; },
+    getMoveDelta() { return leftDelta; },  // normalized by game logic
+    drawJoysticks(gfx) {
+      if (!active || !G.started) return;
+      // Left joystick base
+      if (leftId !== null) {
+        gfx.save();
+        gfx.globalAlpha = 0.3;
+        gfx.strokeStyle = '#00ffff'; gfx.lineWidth = 2;
+        gfx.beginPath(); gfx.arc(leftBase.x, leftBase.y, 50, 0, Math.PI * 2); gfx.stroke();
+        // Thumb indicator
+        const clamp = 50;
+        const len = Math.sqrt(leftDelta.x * leftDelta.x + leftDelta.y * leftDelta.y);
+        const cx = leftBase.x + (len > clamp ? (leftDelta.x / len) * clamp : leftDelta.x);
+        const cy = leftBase.y + (len > clamp ? (leftDelta.y / len) * clamp : leftDelta.y);
+        gfx.globalAlpha = 0.5;
+        gfx.fillStyle = '#00ffff';
+        gfx.beginPath(); gfx.arc(cx, cy, 20, 0, Math.PI * 2); gfx.fill();
+        gfx.restore();
+      }
+      // Right zone aim indicator
+      if (rightId !== null) {
+        gfx.save();
+        gfx.globalAlpha = 0.2;
+        gfx.strokeStyle = '#ffff00'; gfx.lineWidth = 1;
+        gfx.beginPath(); gfx.arc(rightBase.x, rightBase.y, 40, 0, Math.PI * 2); gfx.stroke();
+        gfx.restore();
+      }
+    },
+  };
+})();
+
+// ============================================================
+// TOUCH OVERLAY BUTTONS (HTML, not canvas)
+// ============================================================
+(function buildTouchUI() {
+  const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+  if (!isTouchDevice) return;
+
+  AudioEngine.initMobile(); // widen beat window to 150ms
+
+  const style = document.createElement('style');
+  style.textContent = `
+    #touch-ui { position:fixed; z-index:20; pointer-events:none; top:0; left:0; width:100%; height:100%; }
+    .touch-btn {
+      position:absolute; pointer-events:all;
+      border-radius:50%; display:flex; align-items:center; justify-content:center;
+      font-family:'Courier New',monospace; font-weight:bold; font-size:12px;
+      text-align:center; line-height:1.2; cursor:pointer; user-select:none;
+      -webkit-tap-highlight-color:transparent;
+    }
+    #btn-shaft {
+      width:72px; height:72px; top:16px; right:16px;
+      background:rgba(100,0,150,0.7); border:2px solid #cc00ff; color:#cc00ff;
+    }
+    #btn-wpn-prev { width:52px; height:52px; bottom:90px; right:16px; background:rgba(0,40,80,0.7); border:2px solid #00ccff; color:#00ccff; }
+    #btn-wpn-next { width:52px; height:52px; bottom:30px; right:16px; background:rgba(0,40,80,0.7); border:2px solid #00ccff; color:#00ccff; }
+  `;
+  document.head.appendChild(style);
+
+  const ui = document.createElement('div'); ui.id = 'touch-ui';
+  ui.innerHTML = `
+    <div class="touch-btn" id="btn-shaft">⚡<br>SHAFT</div>
+    <div class="touch-btn" id="btn-wpn-prev">◀<br>WPN</div>
+    <div class="touch-btn" id="btn-wpn-next">WPN<br>▶</div>
+  `;
+  document.body.appendChild(ui);
+
+  document.getElementById('btn-shaft').addEventListener('touchstart', e => {
+    e.preventDefault(); if (G.started) fireShaft();
+  }, { passive: false });
+  document.getElementById('btn-wpn-prev').addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (G.started && G.weaponUnlocked[1]) G.weapon = (G.weapon + 1) % 2;
+  }, { passive: false });
+  document.getElementById('btn-wpn-next').addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (G.started && G.weaponUnlocked[1]) G.weapon = (G.weapon + 1) % 2;
+  }, { passive: false });
+
+  // Shaft cooldown arc overlay on the button
+  const shaftBtn = document.getElementById('btn-shaft');
+  function updateShaftBtn() {
+    if (!G.started) return requestAnimationFrame(updateShaftBtn);
+    const ready = !G.shaftCooldown || G.shaftCooldown <= 0;
+    shaftBtn.style.opacity = ready ? '1' : '0.5';
+    shaftBtn.textContent = ready ? '⚡ SHAFT' : `${Math.ceil(G.shaftCooldown || 0)}s`;
+    requestAnimationFrame(updateShaftBtn);
+  }
+  requestAnimationFrame(updateShaftBtn);
+})();
+
+// ============================================================
+// TOUCH MOVEMENT INTEGRATION
+// Wired here so game update can call Touch.getMoveDelta()
+// ============================================================
+// Add to game update — call after player position update:
+//   const td = Touch.getMoveDelta();
+//   if (Touch.isActive() && (Math.abs(td.x) > 10 || Math.abs(td.y) > 10)) {
+//     const len = Math.sqrt(td.x*td.x + td.y*td.y);
+//     player.x += (td.x/len) * player.speed * dt;
+//     player.y += (td.y/len) * player.speed * dt;
+//   }
+// Also: if (G.touchFireQueued) { doFire(); G.touchFireQueued = false; }
+
+// ============================================================
 // INPUT
 // ============================================================
 canvas.addEventListener('mousemove', e => {
-  G.mouse.x = e.clientX; G.mouse.y = e.clientY;
+  const g = clientToGame(e.clientX, e.clientY);
+  G.mouse.x = g.x; G.mouse.y = g.y;
 });
 canvas.addEventListener('mousedown', e => {
-  if (e.button === 0) G.mouseDown = true;
+  if (e.button === 0) { G.mouseDown = true; }
 });
 canvas.addEventListener('mouseup', e => {
   if (e.button === 0) G.mouseDown = false;
