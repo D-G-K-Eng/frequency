@@ -315,6 +315,42 @@ const AudioEngine = (() => {
     },
     getBPM() { return bpm; },
     setBPM(v) { bpm = Math.max(60, Math.min(200, v)); },
+
+    // Smooth BPM ramp over N beats. Call on wave threshold.
+    // e.g. AudioEngine.rampBPM(140, 8) — reach 140 BPM over 8 beats
+    rampBPM(targetBpm, beatsToRamp = 8) {
+      if (!ctx || !isRunning) { bpm = Math.max(60, Math.min(200, targetBpm)); return; }
+      const startBpm = bpm;
+      const delta = targetBpm - startBpm;
+      if (Math.abs(delta) < 1) return;
+      const startBeat = currentBeat;
+      const rampCallback = (beatNum) => {
+        const elapsed = beatNum - startBeat;
+        if (elapsed >= beatsToRamp) {
+          bpm = Math.max(60, Math.min(200, targetBpm));
+          beatCallbacks = beatCallbacks.filter(cb => cb !== rampCallback);
+          return;
+        }
+        bpm = Math.max(60, Math.min(200, startBpm + delta * (elapsed / beatsToRamp)));
+      };
+      beatCallbacks.push(rampCallback);
+    },
+
+    // Warning sound: fires 1 beat before a sniper shot.
+    // Descending sine blip — distinct from all other sounds in the palette.
+    playWarningSound() {
+      if (!ctx) return;
+      const t = ctx.currentTime;
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, t);
+      osc.frequency.exponentialRampToValueAtTime(440, t + 0.12);
+      osc.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.25, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+      osc.start(t); osc.stop(t + 0.15);
+    },
+
     get currentBeat() { return currentBeat; },
   };
 })();
