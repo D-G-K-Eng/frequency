@@ -521,12 +521,21 @@ const canvas = document.getElementById('c');
 const gfx = canvas.getContext('2d');
 
 let W = 0, H = 0;
+const GAME_W = 900, GAME_H = 700; // forward-declare for resize; applyCanvasScale also uses this
+
 function resize() {
-  W = canvas.width = window.innerWidth;
-  H = canvas.height = window.innerHeight;
+  const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+  if (isTouch) {
+    // Fixed game resolution — CSS transform handles scaling
+    W = canvas.width  = GAME_W;
+    H = canvas.height = GAME_H;
+  } else {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
 }
 resize();
-window.addEventListener('resize', resize);
+window.addEventListener('resize', () => { resize(); if (typeof applyCanvasScale === 'function') applyCanvasScale(); });
 
 // Stars
 const STARS = [];
@@ -737,7 +746,7 @@ function updatePlayer(dt) {
   }
 
   // Auto-fire: hold right joystick beyond threshold
-  const aimActive = G.touchAimActive && Touch.isActive();
+  const aimActive = G.touchAimActive && Touch.isAiming();
 
   const shouldFire = (!Touch.isActive() && (G.mouseDown || G.keys[' '])) || aimActive;
   if (shouldFire && G.fireCooldown <= 0) {
@@ -2263,7 +2272,7 @@ function loop(ts = 0) {
 // ============================================================
 // CANVAS SCALING (mobile + responsive)
 // ============================================================
-const GAME_W = 900, GAME_H = 700;
+// GAME_W / GAME_H declared in resize() block above
 
 function applyCanvasScale() {
   const scaleX = window.innerWidth  / GAME_W;
@@ -2357,6 +2366,7 @@ const Touch = (() => {
 
   return {
     isActive() { return active; },
+    isAiming() { return rightId !== null; },  // true only when right thumb is on screen
     getMoveDelta() { return leftDelta; },  // normalized by game logic
     drawJoysticks(gfx) {
       if (!active || !G.started) return;
