@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FREQUENCY</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+  }
+  canvas { display: block; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ─── Audio Engine (Hammerz) ──────────────────────────────────────────────────
+// 16-step sequencer + beat clock. Source of truth for all game timing.
+//
+// API:
+//   AudioEngine.init()              — create AudioContext (call on user gesture)
+//   AudioEngine.start(bpm)          — begin loop + beat clock
+//   AudioEngine.stop()              — halt
+//   AudioEngine.onBeat(cb)          — register beat callback: cb(beatNumber, audioTime)
+//   AudioEngine.offBeat(cb)         — unregister
+//   AudioEngine.getBeatProgress()   — 0.0–1.0 position within current beat
+//   AudioEngine.isOnBeat(windowMs)  — true if within windowMs of a beat edge (default 100ms)
+//   AudioEngine.getBPM()
+//   AudioEngine.setBPM(bpm)
+//   AudioEngine.currentBeat         — integer beat counter
+
+const AudioEngine = (() => {
+  let ctx = null;
+  let bpm = 128;
+  let isRunning = false;
+  let beatCallbacks = [];
+  let currentBeat = 0;
+  let nextStepTime = 0;
+  let stepIndex = 0;
+  let schedulerTimer = null;
+  let lastBeatAudioTime = 0;
+
+  const SCHEDULE_AHEAD = 0.1;   // seconds
+  const SCHEDULER_MS   = 25;    // poll interval
+
+  // 16-step patterns (quarter note = 4 steps)
+  const PATTERNS = {
+    kick:  [1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0],
+    clap:  [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0],
+    hihat: [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,1],
+    bass:  [40,-1,-1,43, -1,-1,40,-1, -1,43,-1,-1, 40,-1,38,-1],
+  };
+
+  function makeKick(t) {
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.connect(g); g.connect(ctx.destination);
+    osc.frequency.setValueAtTime(150, t);
+    osc.frequency.exponentialRampToValueAtTime(0.01, t + 0.3);
+    g.gain.setValueAtTime(1.2, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+    osc.start(t); osc.stop(t + 0.31);
+  }
+
+  function makeClap(t) {
+    for (let i = 0; i < 3; i++) {
+      const sz = ctx.sampleRate * 0.05;
+      const buf = ctx.createBuffer(1, sz, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let j = 0; j < sz; j++) d[j] = Math.random() * 2 - 1;
+      const src = ctx.createBufferSource(); src.buffer = buf;
+      const flt = ctx.createBiquadFilter(); flt.type = 'bandpass';
+      flt.frequency.value = 1200; flt.Q.value = 0.5;
+      const g = ctx.createGain(); const off = i * 0.01;
+      g.gain.setValueAtTime(0.3, t + off);
+      g.gain.exponentialRampToValueAtTime(0.001, t + off + 0.12);
+      src.connect(flt); flt.connect(g); g.connect(ctx.destination);
+      src.start(t + off); src.stop(t + off + 0.12);
+    }
+  }
+
+  function makeHihat(t, open = false) {
+    const sz = ctx.sampleRate * 0.1;
+    const buf = ctx.createBuffer(1, sz, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < sz; i++) d[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    const flt = ctx.createBiquadFilter(); flt.type = 'highpass'; flt.frequency.value = 8000;
+    const g = ctx.createGain(); const dec = open ? 0.18 : 0.04;
+    g.gain.setValueAtTime(open ? 0.4 : 0.25, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dec);
+    src.connect(flt); flt.connect(g); g.connect(ctx.destination);
+    src.start(t); src.stop(t + dec);
+  }
+
+  function makeBass(t, midi) {
+    const osc = ctx.createOscillator(), flt = ctx.createBiquadFilter(), g = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+    flt.type = 'lowpass';
+    flt.frequency.setValueAtTime(600, t);
+    flt.frequency.exponentialRampToValueAtTime(200, t + 0.15);
+    flt.Q.value = 8;
+    g.gain.setValueAtTime(0.5, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+    osc.connect(flt); flt.connect(g); g.connect(ctx.destination);
+    osc.start(t); osc.stop(t + 0.15);
+  }
+
+  function scheduleStep(si, t) {
+    const i = si % 16;
+    if (PATTERNS.kick[i])  makeKick(t);
+    if (PATTERNS.clap[i])  makeClap(t);
+    if (PATTERNS.hihat[i]) makeHihat(t, i === 14);
+    const bn = PATTERNS.bass[i];
+    if (bn !== -1) makeBass(t, bn);
+  }
+
+  function scheduler() {
+    if (!ctx || !isRunning) return;
+    const spStep = (60 / bpm) / 4; // seconds per 16th note
+
+    while (nextStepTime < ctx.currentTime + SCHEDULE_AHEAD) {
+      scheduleStep(stepIndex, nextStepTime);
+
+      // Fire callbacks on quarter notes (every 4 steps = 1 beat)
+      if (stepIndex % 4 === 0) {
+        const bt = nextStepTime;
+        const bn = Math.floor(stepIndex / 4);
+        lastBeatAudioTime = bt;
+        const delay = Math.max(0, (bt - ctx.currentTime) * 1000);
+        const cap = currentBeat;
+        setTimeout(() => {
+          currentBeat = cap;
+          beatCallbacks.forEach(cb => { try { cb(currentBeat, bt); } catch(e) {} });
+          currentBeat++;
+        }, delay);
+      }
+
+      nextStepTime += spStep;
+      stepIndex++;
+    }
+  }
+
+  return {
+    init() {
+      if (ctx) return;
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+    },
+    start(initialBpm = 128) {
+      if (!ctx) this.init();
+      if (isRunning) return;
+      bpm = initialBpm;
+      isRunning = true;
+      stepIndex = 0;
+      currentBeat = 0;
+      nextStepTime = ctx.currentTime + 0.05;
+      lastBeatAudioTime = nextStepTime;
+      schedulerTimer = setInterval(scheduler, SCHEDULER_MS);
+    },
+    stop() {
+      if (!isRunning) return;
+      isRunning = false;
+      clearInterval(schedulerTimer);
+      schedulerTimer = null;
+      if (ctx) { ctx.close(); ctx = null; }
+    },
+    onBeat(cb)  { if (typeof cb === 'function' && !beatCallbacks.includes(cb)) beatCallbacks.push(cb); },
+    offBeat(cb) { beatCallbacks = beatCallbacks.filter(f => f !== cb); },
+    getBeatProgress() {
+      if (!ctx || !isRunning) return 0;
+      const spBeat = 60 / bpm;
+      const elapsed = ctx.currentTime - lastBeatAudioTime;
+      return Math.min(1, Math.max(0, elapsed / spBeat));
+    },
+    isOnBeat(windowMs = 100) {
+      if (!ctx || !isRunning) return false;
+      const spBeat = 60 / bpm;
+      const window = windowMs / 1000;
+      const elapsed = ctx.currentTime - lastBeatAudioTime;
+      return elapsed < window || (spBeat - elapsed) < window;
+    },
+    // Sound effects for game events
+    playAttackSound(onBeat) {
+      if (!ctx) return;
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.value = onBeat ? 880 : 440;
+      osc.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.3, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08);
+      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.09);
+    },
+    playHurtSound() {
+      if (!ctx) return;
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = 'sawtooth'; osc.frequency.value = 150;
+      osc.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.5, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.21);
+    },
+    getBPM() { return bpm; },
+    setBPM(v) { bpm = Math.max(60, Math.min(200, v)); },
+    get currentBeat() { return currentBeat; },
+  };
+})();
+
+// ─── Game (Viv) ──────────────────────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const BASE_W = 900;
+const BASE_H = 700;
+canvas.width = BASE_W;
+canvas.height = BASE_H;
+
+let gameState = 'menu';
+let score = 0;
+let combo = 0;
+let maxCombo = 0;
+let wave = 1;
+let waveTimer = 0;
+
+let beatPulses = [];
+let enemies = [];
+let particles = [];
+let damageNumbers = [];
+let attackRings = [];
+
+// Beat callback — registered when game starts
+function onBeatGame(beatNum) {
+  if (gameState !== 'playing') return;
+  beatPulses.push({ r: player.radius + 5, alpha: 1.0 });
+
+  enemies.forEach(e => {
+    e.pulsing = true;
+    e.pulseTimer = 0;
+    const dx = player.x - e.x, dy = player.y - e.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if (dist < e.radius + player.radius + 20 && !player.invincible) {
+      player.health -= e.damage;
+      player.invincibleTimer = 0.4;
+      player.invincible = true;
+      player.hurtFlash = 0.3;
+      AudioEngine.playHurtSound();
+      if (player.health <= 0) { player.health = 0; triggerGameOver(); }
+    }
+  });
+}
+
+const player = {
+  x: BASE_W / 2, y: BASE_H / 2,
+  radius: 18, speed: 240,
+  health: 100, maxHealth: 100,
+  invincible: false, invincibleTimer: 0, hurtFlash: 0,
+  attackCooldown: 0,
+};
+
+function spawnEnemy() {
+  const side = Math.floor(Math.random() * 4);
+  const margin = 30;
+  let x, y;
+  if      (side === 0) { x = Math.random() * BASE_W; y = -margin; }
+  else if (side === 1) { x = BASE_W + margin; y = Math.random() * BASE_H; }
+  else if (side === 2) { x = Math.random() * BASE_W; y = BASE_H + margin; }
+  else                 { x = -margin; y = Math.random() * BASE_H; }
+
+  const tier = Math.min(3, Math.floor((wave - 1) / 3) + 1);
+  const r = 20 + Math.random() * 10 + tier * 4;
+  const colors = [
+    { fill: '#ff3300', glow: '#ff6600' },
+    { fill: '#ff6600', glow: '#ffaa00' },
+    { fill: '#cc0066', glow: '#ff00aa' },
+    { fill: '#990000', glow: '#ff0000' },
+  ];
+  const col = colors[Math.floor(Math.random() * colors.length)];
+  return {
+    x, y, radius: r, baseRadius: r,
+    speed: 55 + Math.random() * 30 + wave * 3,
+    health: 20 + tier * 15 + Math.floor(wave / 2) * 5,
+    maxHealth: 20 + tier * 15 + Math.floor(wave / 2) * 5,
+    damage: 8 + tier * 3,
+    fill: col.fill, glow: col.glow,
+    pulsing: false, pulseTimer: 0, angle: 0,
+  };
+}
+
+function spawnWave() {
+  const count = 3 + wave * 2;
+  for (let i = 0; i < count; i++) {
+    setTimeout(() => { if (gameState === 'playing') enemies.push(spawnEnemy()); }, i * 400);
+  }
+}
+
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space' && gameState === 'playing') { e.preventDefault(); doAttack(); }
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+canvas.addEventListener('click', () => {
+  if (gameState === 'menu')     { startGame(); return; }
+  if (gameState === 'gameover') { resetGame(); return; }
+  if (gameState === 'playing')  { doAttack(); }
+});
+
+function doAttack() {
+  if (player.attackCooldown > 0) return;
+  const onBeat = AudioEngine.isOnBeat();
+  const dmg = onBeat ? 25 : 12;
+  player.attackCooldown = 0.18;
+  AudioEngine.playAttackSound(onBeat);
+  attackRings.push({ x: player.x, y: player.y, r: player.radius, maxR: 80, alpha: 1, onBeat, damage: dmg, hit: new Set() });
+  combo++;
+  if (combo > maxCombo) maxCombo = combo;
+  if (onBeat) {
+    damageNumbers.push({ x: player.x + (Math.random() - 0.5) * 60, y: player.y - 40, text: 'ON BEAT!', color: '#00ffff', alpha: 1, vy: -80, size: 18 });
+  }
+}
+
+function startGame() {
+  gameState = 'playing';
+  AudioEngine.start(128);
+  AudioEngine.onBeat(onBeatGame);
+  spawnWave();
+}
+
+function resetGame() {
+  score = 0; combo = 0; maxCombo = 0; wave = 1; waveTimer = 0;
+  player.x = BASE_W / 2; player.y = BASE_H / 2;
+  player.health = player.maxHealth;
+  player.invincible = false; player.invincibleTimer = 0; player.hurtFlash = 0;
+  player.attackCooldown = 0;
+  enemies = []; particles = []; damageNumbers = []; beatPulses = []; attackRings = [];
+  AudioEngine.stop();
+  startGame();
+}
+
+function triggerGameOver() {
+  gameState = 'gameover';
+  AudioEngine.offBeat(onBeatGame);
+  AudioEngine.stop();
+}
+
+function killEnemy(e) {
+  score += 100 * combo;
+  for (let p = 0; p < 16; p++) {
+    const a = Math.random() * Math.PI * 2, s = 80 + Math.random() * 160;
+    particles.push({ x: e.x, y: e.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, r: 4 + Math.random() * 5, color: e.glow, alpha: 1, decay: 1.5 + Math.random() });
+  }
+  damageNumbers.push({ x: e.x, y: e.y, text: '+' + (100 * combo), color: '#ffff00', alpha: 1, vy: -100, size: 14 });
+  enemies.splice(enemies.indexOf(e), 1);
+}
+
+let lastTime = 0;
+
+function update(dt) {
+  if (gameState !== 'playing') return;
+
+  let dx = 0, dy = 0;
+  if (keys['ArrowLeft']  || keys['KeyA']) dx -= 1;
+  if (keys['ArrowRight'] || keys['KeyD']) dx += 1;
+  if (keys['ArrowUp']    || keys['KeyW']) dy -= 1;
+  if (keys['ArrowDown']  || keys['KeyS']) dy += 1;
+  if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
+  player.x = Math.max(player.radius, Math.min(BASE_W - player.radius, player.x + dx * player.speed * dt));
+  player.y = Math.max(player.radius, Math.min(BASE_H - player.radius, player.y + dy * player.speed * dt));
+
+  if (player.invincible)       { player.invincibleTimer -= dt; if (player.invincibleTimer <= 0) player.invincible = false; }
+  if (player.hurtFlash > 0)    player.hurtFlash -= dt;
+  if (player.attackCooldown > 0) player.attackCooldown -= dt;
+
+  for (let i = attackRings.length - 1; i >= 0; i--) {
+    const ring = attackRings[i];
+    ring.r += 400 * dt;
+    ring.alpha -= dt * 3;
+    enemies.forEach(e => {
+      if (ring.hit.has(e)) return;
+      const ddx = e.x - ring.x, ddy = e.y - ring.y;
+      const dist = Math.sqrt(ddx*ddx + ddy*ddy);
+      if (dist < ring.r + e.radius && dist > ring.r - e.radius - 10) {
+        ring.hit.add(e);
+        e.health -= ring.damage;
+        damageNumbers.push({ x: e.x + (Math.random()-0.5)*30, y: e.y - e.radius - 10, text: '-' + ring.damage, color: ring.onBeat ? '#00ffff' : '#ffaa00', alpha: 1, vy: -60, size: ring.onBeat ? 16 : 13 });
+        if (e.health <= 0) killEnemy(e);
+      }
+    });
+    if (ring.alpha <= 0 || ring.r > ring.maxR) attackRings.splice(i, 1);
+  }
+
+  for (let i = beatPulses.length - 1; i >= 0; i--) {
+    const p = beatPulses[i];
+    p.r += 250 * dt; p.alpha -= dt * 2.5;
+    if (p.alpha <= 0) beatPulses.splice(i, 1);
+  }
+
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    const ddx = player.x - e.x, ddy = player.y - e.y;
+    const dist = Math.sqrt(ddx*ddx + ddy*ddy);
+    if (dist > 0) { e.x += (ddx/dist) * e.speed * dt; e.y += (ddy/dist) * e.speed * dt; }
+    e.angle += dt * 1.5;
+    if (e.pulsing) {
+      e.pulseTimer += dt;
+      e.radius = e.baseRadius * (1 + 0.25 * Math.sin((e.pulseTimer / 0.15) * Math.PI));
+      if (e.pulseTimer >= 0.15) { e.pulsing = false; e.radius = e.baseRadius; }
+    }
+  }
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.alpha -= dt * p.decay; p.r -= dt * 10;
+    if (p.alpha <= 0 || p.r <= 0) particles.splice(i, 1);
+  }
+
+  for (let i = damageNumbers.length - 1; i >= 0; i--) {
+    const n = damageNumbers[i];
+    n.y += n.vy * dt; n.alpha -= dt * 1.5;
+    if (n.alpha <= 0) damageNumbers.splice(i, 1);
+  }
+
+  if (enemies.length === 0) {
+    waveTimer += dt;
+    if (waveTimer > 2.5) { wave++; waveTimer = 0; spawnWave(); }
+  }
+}
+
+// ─── Draw ────────────────────────────────────────────────────────────────────
+function drawGrid() {
+  ctx.save(); ctx.strokeStyle = 'rgba(0,255,255,0.04)'; ctx.lineWidth = 1;
+  for (let x = 0; x < BASE_W; x += 50) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,BASE_H); ctx.stroke(); }
+  for (let y = 0; y < BASE_H; y += 50) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(BASE_W,y); ctx.stroke(); }
+  ctx.restore();
+}
+
+function drawPlayer() {
+  const bp = AudioEngine.getBeatProgress();
+  const pulse = 1 + Math.sin(bp * Math.PI) * 0.05;
+  const r = player.radius * pulse;
+
+  if (player.hurtFlash > 0) {
+    ctx.save(); ctx.globalAlpha = player.hurtFlash * 2;
+    ctx.shadowBlur = 30; ctx.shadowColor = '#ff0000';
+    ctx.beginPath(); ctx.arc(player.x, player.y, r + 12, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,0,0,0.4)'; ctx.fill(); ctx.restore();
+  }
+
+  ctx.save();
+  ctx.globalAlpha = player.invincible ? Math.abs(Math.sin(Date.now() / 80)) * 0.5 + 0.3 : 1;
+  const grad = ctx.createRadialGradient(player.x, player.y, 0, player.x, player.y, r * 2.5);
+  grad.addColorStop(0, 'rgba(0,255,255,0.3)'); grad.addColorStop(1, 'rgba(0,255,255,0)');
+  ctx.beginPath(); ctx.arc(player.x, player.y, r * 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.shadowBlur = 25; ctx.shadowColor = '#00ffff';
+  ctx.beginPath(); ctx.arc(player.x, player.y, r, 0, Math.PI * 2);
+  ctx.fillStyle = '#00ffff'; ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.arc(player.x - r*0.3, player.y - r*0.3, r*0.4, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.fill();
+  ctx.restore();
+}
+
+function drawEnemy(e) {
+  const r = e.radius;
+  const grad = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r * 2);
+  grad.addColorStop(0, e.fill.replace(')', ',0.35)').replace('rgb','rgba'));
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.beginPath(); ctx.arc(e.x, e.y, r * 2, 0, Math.PI * 2); ctx.fillStyle = grad; ctx.fill();
+
+  ctx.save(); ctx.shadowBlur = 18; ctx.shadowColor = e.glow;
+  ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.fillStyle = e.fill; ctx.fill();
+  ctx.save(); ctx.translate(e.x, e.y); ctx.rotate(e.angle);
+  ctx.strokeStyle = e.glow; ctx.lineWidth = 2; ctx.globalAlpha = 0.5;
+  ctx.beginPath();
+  for (let i = 0; i < 3; i++) { const a = (i/3)*Math.PI*2; ctx.moveTo(0,0); ctx.lineTo(Math.cos(a)*r*0.5, Math.sin(a)*r*0.5); }
+  ctx.stroke(); ctx.restore(); ctx.restore();
+
+  if (e.health < e.maxHealth) {
+    const bw = r * 2.2, bh = 4, bx = e.x - bw/2, by = e.y + r + 6;
+    ctx.fillStyle = '#333'; ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = e.glow; ctx.fillRect(bx, by, bw * (e.health/e.maxHealth), bh);
+  }
+}
+
+function drawHUD() {
+  const hbW = 220, hbH = 16, hbX = 20, hbY = BASE_H - 40;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(hbX-2, hbY-2, hbW+4, hbH+4);
+  ctx.fillStyle = '#1a0000'; ctx.fillRect(hbX, hbY, hbW, hbH);
+  const hpPct = player.health / player.maxHealth;
+  const hpColor = hpPct > 0.5 ? '#00ff88' : hpPct > 0.25 ? '#ffaa00' : '#ff2200';
+  ctx.fillStyle = hpColor; ctx.shadowBlur = 8; ctx.shadowColor = hpColor;
+  ctx.fillRect(hbX, hbY, hbW * hpPct, hbH); ctx.shadowBlur = 0;
+  ctx.font = 'bold 12px Courier New'; ctx.fillStyle = '#fff'; ctx.textAlign = 'left';
+  ctx.fillText(`HP ${Math.ceil(player.health)} / ${player.maxHealth}`, hbX, hbY - 6);
+
+  ctx.font = 'bold 22px Courier New'; ctx.textAlign = 'right';
+  ctx.shadowBlur = 10; ctx.shadowColor = '#00ffff'; ctx.fillStyle = '#00ffff';
+  ctx.fillText(score.toLocaleString(), BASE_W - 20, 36); ctx.shadowBlur = 0;
+
+  if (combo > 1) {
+    ctx.font = `bold ${Math.min(28, 12 + combo)}px Courier New`; ctx.textAlign = 'right';
+    ctx.shadowBlur = 12; ctx.shadowColor = '#ffff00'; ctx.fillStyle = '#ffff00';
+    ctx.fillText(`x${combo} COMBO`, BASE_W - 20, 64); ctx.shadowBlur = 0;
+  }
+
+  ctx.font = 'bold 14px Courier New'; ctx.textAlign = 'left';
+  ctx.shadowBlur = 8; ctx.shadowColor = '#ff6600'; ctx.fillStyle = '#ff6600';
+  ctx.fillText(`WAVE ${wave}`, 20, 36); ctx.shadowBlur = 0;
+  ctx.font = '12px Courier New'; ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText(`enemies: ${enemies.length}`, 20, 56);
+
+  // Beat indicator bar
+  const bp = AudioEngine.getBeatProgress();
+  const onBeat = AudioEngine.isOnBeat();
+  const bx = BASE_W / 2, by = BASE_H - 28, bw = 200;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(bx - bw/2, by - 8, bw, 16);
+  ctx.fillStyle = onBeat ? '#00ffff' : '#333366';
+  ctx.shadowBlur = onBeat ? 15 : 0; ctx.shadowColor = '#00ffff';
+  ctx.fillRect(bx - bw/2, by - 8, bw * (1 - bp), 16); ctx.shadowBlur = 0;
+  ctx.font = '11px Courier New'; ctx.textAlign = 'center';
+  ctx.fillStyle = onBeat ? '#ffffff' : 'rgba(255,255,255,0.4)';
+  ctx.fillText(onBeat ? '◆ ON BEAT ◆' : '· BEAT ·', bx, by + 4);
+  ctx.font = '10px Courier New'; ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.fillText('[SPACE] or [CLICK] to attack', bx, by + 22);
+
+  if (enemies.length === 0 && waveTimer > 0) {
+    const t = waveTimer / 2.5;
+    ctx.save(); ctx.globalAlpha = Math.sin(t * Math.PI);
+    ctx.font = 'bold 28px Courier New'; ctx.textAlign = 'center';
+    ctx.shadowBlur = 20; ctx.shadowColor = '#00ffff'; ctx.fillStyle = '#00ffff';
+    ctx.fillText(`WAVE ${wave - 1} CLEAR`, BASE_W/2, BASE_H/2 - 30);
+    ctx.font = 'bold 18px Courier New'; ctx.shadowColor = '#ffff00'; ctx.fillStyle = '#ffff00';
+    ctx.fillText(`WAVE ${wave} INCOMING...`, BASE_W/2, BASE_H/2 + 10);
+    ctx.restore();
+  }
+}
+
+function drawMenu() {
+  ctx.fillStyle = '#050510'; ctx.fillRect(0, 0, BASE_W, BASE_H);
+  drawGrid();
+  const t = Date.now() / 1000;
+  for (let i = 0; i < 8; i++) {
+    const a = (i/8)*Math.PI*2 + t*0.3, dist = 120 + Math.sin(t*0.7+i)*20;
+    const cx = BASE_W/2 + Math.cos(a)*dist, cy = BASE_H/2 + Math.sin(a)*dist*0.5;
+    const r = 8 + Math.sin(t*2+i)*3;
+    ctx.save(); ctx.shadowBlur = 15; ctx.shadowColor = i%2===0 ? '#ff3300' : '#ff6600';
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2);
+    ctx.fillStyle = i%2===0 ? '#ff3300' : '#ff6600'; ctx.fill(); ctx.restore();
+  }
+  const pp = (Math.sin(t*4)+1)/2;
+  ctx.save(); ctx.shadowBlur = 30 + pp*10; ctx.shadowColor = '#00ffff';
+  ctx.beginPath(); ctx.arc(BASE_W/2, BASE_H/2, 22+pp*4, 0, Math.PI*2);
+  ctx.fillStyle = '#00ffff'; ctx.fill(); ctx.restore();
+
+  const tp = 0.85 + Math.sin(t*3)*0.15;
+  ctx.save(); ctx.font = 'bold 72px Courier New'; ctx.textAlign = 'center';
+  ctx.shadowBlur = 40*tp; ctx.shadowColor = '#00ffff'; ctx.fillStyle = '#00ffff'; ctx.globalAlpha = tp;
+  ctx.fillText('FREQUENCY', BASE_W/2, 130); ctx.restore();
+  ctx.save(); ctx.font = '16px Courier New'; ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(0,255,255,0.5)'; ctx.fillText('RHYTHM SURVIVAL', BASE_W/2, 160); ctx.restore();
+
+  const instructions = [['WASD / ARROWS','Move'],['SPACE / CLICK','Attack'],['',''],['Attack ON BEAT for full damage',''],['Enemies pulse and strike on the beat','']];
+  const iy = BASE_H/2 + 80;
+  instructions.forEach((inst, i) => {
+    ctx.save(); ctx.font = inst[1] ? 'bold 14px Courier New' : '13px Courier New';
+    ctx.textAlign = 'center';
+    if (inst[0] && inst[1]) {
+      ctx.textAlign = 'right'; ctx.fillStyle = '#00ffff';
+      ctx.fillText(inst[0], BASE_W/2-10, iy+i*26);
+      ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.fillText('— ' + inst[1], BASE_W/2+10, iy+i*26);
+    } else if (inst[0]) {
+      ctx.fillStyle = 'rgba(0,255,255,0.7)'; ctx.fillText(inst[0], BASE_W/2, iy+i*26);
+    }
+    ctx.restore();
+  });
+
+  const ba = (Math.sin(t*3)+1)/2;
+  ctx.save(); ctx.globalAlpha = 0.5 + ba*0.5; ctx.font = 'bold 20px Courier New'; ctx.textAlign = 'center';
+  ctx.shadowBlur = 15; ctx.shadowColor = '#fff'; ctx.fillStyle = '#fff';
+  ctx.fillText('CLICK TO START', BASE_W/2, BASE_H-60); ctx.restore();
+}
+
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(0,0,BASE_W,BASE_H);
+  const t = Date.now()/1000;
+  ctx.save(); ctx.font = 'bold 64px Courier New'; ctx.textAlign = 'center';
+  ctx.shadowBlur = 30; ctx.shadowColor = '#ff0000'; ctx.fillStyle = '#ff2200';
+  ctx.fillText('GAME OVER', BASE_W/2, BASE_H/2-100); ctx.restore();
+  ctx.save(); ctx.font = 'bold 28px Courier New'; ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff'; ctx.fillText('SCORE', BASE_W/2, BASE_H/2-30);
+  ctx.font = 'bold 48px Courier New'; ctx.shadowBlur = 20; ctx.shadowColor = '#00ffff'; ctx.fillStyle = '#00ffff';
+  ctx.fillText(score.toLocaleString(), BASE_W/2, BASE_H/2+30); ctx.restore();
+  ctx.save(); ctx.font = '18px Courier New'; ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255,255,0,0.8)'; ctx.fillText(`MAX COMBO: x${maxCombo}`, BASE_W/2, BASE_H/2+75);
+  ctx.fillStyle = 'rgba(255,100,0,0.8)'; ctx.fillText(`WAVE REACHED: ${wave}`, BASE_W/2, BASE_H/2+105); ctx.restore();
+  const ba = (Math.sin(t*3)+1)/2;
+  ctx.save(); ctx.globalAlpha = 0.5+ba*0.5; ctx.font = 'bold 20px Courier New'; ctx.textAlign = 'center';
+  ctx.shadowBlur = 15; ctx.shadowColor = '#fff'; ctx.fillStyle = '#fff';
+  ctx.fillText('CLICK TO PLAY AGAIN', BASE_W/2, BASE_H/2+160); ctx.restore();
+}
+
+function loop(ts) {
+  const dt = Math.min((ts - lastTime) / 1000, 0.05);
+  lastTime = ts;
+  ctx.fillStyle = '#050510'; ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+  if (gameState === 'menu') {
+    drawMenu();
+  } else if (gameState === 'playing') {
+    drawGrid(); update(dt);
+    beatPulses.forEach(p => {
+      ctx.save(); ctx.globalAlpha = p.alpha * 0.6;
+      ctx.strokeStyle = '#00ffff'; ctx.lineWidth = 2; ctx.shadowBlur = 10; ctx.shadowColor = '#00ffff';
+      ctx.beginPath(); ctx.arc(player.x, player.y, p.r, 0, Math.PI*2); ctx.stroke(); ctx.restore();
+    });
+    enemies.forEach(drawEnemy);
+    attackRings.forEach(ring => {
+      ctx.save(); ctx.globalAlpha = ring.alpha;
+      ctx.strokeStyle = ring.onBeat ? '#00ffff' : '#ffaa00';
+      ctx.lineWidth = ring.onBeat ? 3 : 2;
+      ctx.shadowBlur = ring.onBeat ? 20 : 10; ctx.shadowColor = ring.onBeat ? '#00ffff' : '#ffaa00';
+      ctx.beginPath(); ctx.arc(ring.x, ring.y, ring.r, 0, Math.PI*2); ctx.stroke(); ctx.restore();
+    });
+    drawPlayer();
+    particles.forEach(p => {
+      ctx.save(); ctx.globalAlpha = p.alpha; ctx.shadowBlur = 8; ctx.shadowColor = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fillStyle = p.color; ctx.fill(); ctx.restore();
+    });
+    damageNumbers.forEach(n => {
+      ctx.save(); ctx.globalAlpha = n.alpha; ctx.font = `bold ${n.size}px Courier New`;
+      ctx.textAlign = 'center'; ctx.shadowBlur = 8; ctx.shadowColor = n.color; ctx.fillStyle = n.color;
+      ctx.fillText(n.text, n.x, n.y); ctx.restore();
+    });
+    drawHUD();
+  } else if (gameState === 'gameover') {
+    drawGrid();
+    enemies.forEach(drawEnemy);
+    particles.forEach(p => {
+      ctx.save(); ctx.globalAlpha = p.alpha; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fillStyle=p.color; ctx.fill(); ctx.restore();
+    });
+    drawGameOver();
+  }
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(ts => { lastTime = ts; requestAnimationFrame(loop); });
+</script>
+</body>
+</html>
