@@ -553,7 +553,7 @@ const G = {
   // Enemy projectiles
   eProjectiles: [],
   // Input
-  mouse: { x: 0, y: 0 }, keys: {}, mouseDown: false, touchFireQueued: false,
+  mouse: { x: 0, y: 0 }, keys: {}, mouseDown: false, touchFireQueued: false, touchAimActive: false, touchAimAngle: 0,
   // Firing
   fireCooldown: 0,
   // Powerup timers (in beats)
@@ -671,27 +671,27 @@ function updatePlayer(dt) {
   const p = G.player;
   if (!p) return;
 
-  // Smooth follow mouse
-  const speed = 6 * (G.overclockBeats > 0 ? 1.5 : 1);
-  p.x += (G.mouse.x - p.x) * speed * dt;
-  p.y += (G.mouse.y - p.y) * speed * dt;
+  const m = p.size;
+
+  if (Touch.isActive()) {
+    // Touch: left joystick drives movement directly (normalized -1..1 * speed)
+    const td = Touch.getMoveDelta();
+    const JOYSTICK_MAX = 60; // max pixel radius of joystick
+    const nx = Math.max(-1, Math.min(1, td.x / JOYSTICK_MAX));
+    const ny = Math.max(-1, Math.min(1, td.y / JOYSTICK_MAX));
+    const spd = G.overclockBeats > 0 ? 450 : 300;
+    p.x += nx * spd * dt;
+    p.y += ny * spd * dt;
+  } else {
+    // Mouse: smooth follow
+    const speed = 6 * (G.overclockBeats > 0 ? 1.5 : 1);
+    p.x += (G.mouse.x - p.x) * speed * dt;
+    p.y += (G.mouse.y - p.y) * speed * dt;
+  }
 
   // Clamp
-  const m = p.size;
   p.x = Math.max(m, Math.min(W - m, p.x));
   p.y = Math.max(m, Math.min(H - m, p.y));
-
-  // Touch movement (left joystick overrides mouse-follow on touch devices)
-  const td = Touch.getMoveDelta();
-  if (Touch.isActive() && (Math.abs(td.x) > 10 || Math.abs(td.y) > 10)) {
-    const len = Math.sqrt(td.x * td.x + td.y * td.y);
-    const spd = G.overclockBeats > 0 ? 450 : 300; // touch movement speed px/s
-    p.x += (td.x / len) * spd * dt;
-    p.y += (td.y / len) * spd * dt;
-    // Re-clamp after touch movement
-    p.x = Math.max(m, Math.min(W - m, p.x));
-    p.y = Math.max(m, Math.min(H - m, p.y));
-  }
 
   // Angle toward mouse (rotate ship toward direction of movement)
   const dx = G.mouse.x - p.x, dy = G.mouse.y - p.y;
@@ -724,13 +724,22 @@ function updatePlayer(dt) {
 
   // Firing
   G.fireCooldown -= dt;
-  // Touch tap-to-fire
+  // Touch: auto-fire when right joystick is actively pushed
   if (G.touchFireQueued) {
-    G.mouseDown = true;
     G.touchFireQueued = false;
+    // tap-fire: one shot
+    if (G.fireCooldown <= 0) {
+      const onBeat = AudioEngine.isOnBeat();
+      if (G.weapon === 0) firePlasmaRing(onBeat);
+      else fireLaserBurst(onBeat);
+      G.fireCooldown = G.weapon === 0 ? 0.45 : 0.15;
+    }
   }
 
-  const shouldFire = G.mouseDown || G.keys[' '];
+  // Auto-fire: hold right joystick beyond threshold
+  const aimActive = G.touchAimActive && Touch.isActive();
+
+  const shouldFire = (!Touch.isActive() && (G.mouseDown || G.keys[' '])) || aimActive;
   if (shouldFire && G.fireCooldown <= 0) {
     const onBeat = AudioEngine.isOnBeat();
     if (G.weapon === 0) {
@@ -2308,8 +2317,7 @@ const Touch = (() => {
         rightId = t.identifier;
         rightBase = { x: g.x, y: g.y };
         rightDelta = { x: 0, y: 0 };
-        // Tap on right = fire
-        if (G.started) G.touchFireQueued = true;
+        // Right joystick initial touch — don't fire immediately, wait for drag or sustained hold
       }
     }
   }, { passive: false });
@@ -2322,12 +2330,16 @@ const Touch = (() => {
         leftDelta = { x: g.x - leftBase.x, y: g.y - leftBase.y };
       } else if (t.identifier === rightId) {
         rightDelta = { x: g.x - rightBase.x, y: g.y - rightBase.y };
-        // Update aim: mouse = right joystick direction from player
+        // Update aim: set G.mouse to a virtual point in aim direction from player
+        // Use a far-off point so ship rotation tracks cleanly without pulling movement
         if (G.player) {
           const len = Math.sqrt(rightDelta.x * rightDelta.x + rightDelta.y * rightDelta.y);
-          if (len > 8) {
-            G.mouse.x = G.player.x + (rightDelta.x / len) * 200;
-            G.mouse.y = G.player.y + (rightDelta.y / len) * 200;
+          if (len > 12) {
+            // Place aim point far ahead in joystick direction (doesn't affect movement)
+            G.touchAimAngle = Math.atan2(rightDelta.y, rightDelta.x);
+            G.mouse.x = G.player.x + Math.cos(G.touchAimAngle) * 999;
+            G.mouse.y = G.player.y + Math.sin(G.touchAimAngle) * 999;
+            G.touchAimActive = true;
           }
         }
       }
@@ -2336,7 +2348,8 @@ const Touch = (() => {
 
   function endTouch(id) {
     if (id === leftId)  { leftId = null;  leftDelta  = { x: 0, y: 0 }; }
-    if (id === rightId) { rightId = null; rightDelta = { x: 0, y: 0 }; }
+    if (id === rightId) { rightId = null; rightDelta = { x: 0, y: 0 }; G.touchAimActive = false; }
+    if (leftId === null && rightId === null) active = false;
   }
 
   canvas.addEventListener('touchend',    e => { e.preventDefault(); for (const t of e.changedTouches) endTouch(t.identifier); }, { passive: false });
