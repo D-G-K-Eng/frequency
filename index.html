@@ -2281,6 +2281,10 @@ const _isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints >
 function applyCanvasScale() {
   if (!_isTouchDevice) {
     // Desktop: canvas fills window, no transform needed
+    canvas.style.position = '';
+    canvas.style.left = '';
+    canvas.style.top = '';
+    canvas.style.transform = '';
     canvas._scale = 1;
     return;
   }
