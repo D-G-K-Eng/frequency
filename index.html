@@ -64,13 +64,22 @@ canvas { display: block; }
 'use strict';
 
 // ============================================================
-// AUDIO ENGINE (preserved exactly as specified)
+// AUDIO ENGINE (Hammerz — canonical)
 // ============================================================
 const AudioEngine = (() => {
-  let ctx = null, bpm = 128, isRunning = false;
-  let beatCallbacks = [], currentBeat = 0, nextStepTime = 0;
-  let stepIndex = 0, schedulerTimer = null, lastBeatAudioTime = 0;
-  const SCHEDULE_AHEAD = 0.1, SCHEDULER_MS = 25;
+  let ctx = null;
+  let bpm = 128;
+  let isRunning = false;
+  let beatCallbacks = [];
+  let currentBeat = 0;
+  let nextStepTime = 0;
+  let stepIndex = 0;
+  let schedulerTimer = null;
+  let lastBeatAudioTime = 0;
+
+  const SCHEDULE_AHEAD = 0.1;
+  const SCHEDULER_MS   = 25;
+
   const PATTERNS = {
     kick:  [1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0],
     clap:  [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0],
@@ -79,131 +88,234 @@ const AudioEngine = (() => {
   };
 
   function makeKick(t) {
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.connect(g); g.connect(ctx.destination);
-    o.frequency.setValueAtTime(150, t);
-    o.frequency.exponentialRampToValueAtTime(0.01, t + 0.5);
-    g.gain.setValueAtTime(1, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
-    o.start(t); o.stop(t + 0.5);
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.connect(g); g.connect(ctx.destination);
+    osc.frequency.setValueAtTime(150, t);
+    osc.frequency.exponentialRampToValueAtTime(0.01, t + 0.3);
+    g.gain.setValueAtTime(1.2, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+    osc.start(t); osc.stop(t + 0.31);
   }
+
   function makeClap(t) {
-    const buf = ctx.createBuffer(1, ctx.sampleRate * 0.1, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-    const src = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain();
-    f.type = 'bandpass'; f.frequency.value = 1200; f.Q.value = 0.5;
-    src.buffer = buf; src.connect(f); f.connect(g); g.connect(ctx.destination);
-    g.gain.setValueAtTime(0.3, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
-    src.start(t); src.stop(t + 0.1);
-  }
-  function makeHihat(t, vol = 0.15) {
-    const buf = ctx.createBuffer(1, ctx.sampleRate * 0.05, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-    const src = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain();
-    f.type = 'highpass'; f.frequency.value = 8000;
-    src.buffer = buf; src.connect(f); f.connect(g); g.connect(ctx.destination);
-    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
-    src.start(t); src.stop(t + 0.05);
-  }
-  function makeBass(t, note) {
-    if (note < 0) return;
-    const freq = 440 * Math.pow(2, (note - 69) / 12);
-    const o = ctx.createOscillator(), f = ctx.createBiquadFilter(), g = ctx.createGain();
-    o.type = 'sawtooth'; f.type = 'lowpass'; f.frequency.value = 400;
-    o.connect(f); f.connect(g); g.connect(ctx.destination);
-    o.frequency.value = freq;
-    g.gain.setValueAtTime(0.3, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
-    o.start(t); o.stop(t + 0.25);
-  }
-  function scheduleStep(idx, t) {
-    const b = idx % 16;
-    if (PATTERNS.kick[b]) makeKick(t);
-    if (PATTERNS.clap[b]) makeClap(t);
-    if (PATTERNS.hihat[b]) makeHihat(t);
-    makeBass(t, PATTERNS.bass[b]);
-    if (b % 4 === 0) {
-      lastBeatAudioTime = t;
-      beatCallbacks.forEach(cb => cb(Math.floor(b / 4), t));
+    for (let i = 0; i < 3; i++) {
+      const sz = ctx.sampleRate * 0.05;
+      const buf = ctx.createBuffer(1, sz, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let j = 0; j < sz; j++) d[j] = Math.random() * 2 - 1;
+      const src = ctx.createBufferSource(); src.buffer = buf;
+      const flt = ctx.createBiquadFilter(); flt.type = 'bandpass';
+      flt.frequency.value = 1200; flt.Q.value = 0.5;
+      const g = ctx.createGain(); const off = i * 0.01;
+      g.gain.setValueAtTime(0.3, t + off);
+      g.gain.exponentialRampToValueAtTime(0.001, t + off + 0.12);
+      src.connect(flt); flt.connect(g); g.connect(ctx.destination);
+      src.start(t + off); src.stop(t + off + 0.12);
     }
   }
+
+  function makeHihat(t, open = false) {
+    const sz = ctx.sampleRate * 0.1;
+    const buf = ctx.createBuffer(1, sz, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < sz; i++) d[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    const flt = ctx.createBiquadFilter(); flt.type = 'highpass'; flt.frequency.value = 8000;
+    const g = ctx.createGain(); const dec = open ? 0.18 : 0.04;
+    g.gain.setValueAtTime(open ? 0.4 : 0.25, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dec);
+    src.connect(flt); flt.connect(g); g.connect(ctx.destination);
+    src.start(t); src.stop(t + dec);
+  }
+
+  function makeBass(t, midi) {
+    if (midi < 0) return;
+    const osc = ctx.createOscillator(), flt = ctx.createBiquadFilter(), g = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+    flt.type = 'lowpass';
+    flt.frequency.setValueAtTime(600, t);
+    flt.frequency.exponentialRampToValueAtTime(200, t + 0.15);
+    flt.Q.value = 8;
+    g.gain.setValueAtTime(0.5, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+    osc.connect(flt); flt.connect(g); g.connect(ctx.destination);
+    osc.start(t); osc.stop(t + 0.15);
+  }
+
+  function scheduleStep(si, t) {
+    const i = si % 16;
+    if (PATTERNS.kick[i])  makeKick(t);
+    if (PATTERNS.clap[i])  makeClap(t);
+    if (PATTERNS.hihat[i]) makeHihat(t, i === 14);
+    const bn = PATTERNS.bass[i];
+    if (bn !== -1) makeBass(t, bn);
+  }
+
   function scheduler() {
+    if (!ctx || !isRunning) return;
+    const spStep = (60 / bpm) / 4;
     while (nextStepTime < ctx.currentTime + SCHEDULE_AHEAD) {
       scheduleStep(stepIndex, nextStepTime);
-      nextStepTime += 60 / bpm / 4;
+      if (stepIndex % 4 === 0) {
+        const bt = nextStepTime;
+        const cap = currentBeat;
+        lastBeatAudioTime = bt;
+        const delay = Math.max(0, (bt - ctx.currentTime) * 1000);
+        setTimeout(() => {
+          currentBeat = cap;
+          beatCallbacks.forEach(cb => { try { cb(currentBeat, bt); } catch(e) {} });
+          currentBeat++;
+        }, delay);
+      }
+      nextStepTime += spStep;
       stepIndex++;
     }
-    schedulerTimer = setTimeout(scheduler, SCHEDULER_MS);
+  }
+
+  // E minor pentatonic ladder: E3 G3 A3 B3 E4
+  function getAttackFreq(score, onBeat) {
+    const TIERS = [
+      { threshold: 0,     midi: 52 },
+      { threshold: 500,   midi: 55 },
+      { threshold: 2000,  midi: 57 },
+      { threshold: 5000,  midi: 59 },
+      { threshold: 10000, midi: 64 },
+    ];
+    let midi = TIERS[0].midi;
+    for (const t of TIERS) { if (score >= t.threshold) midi = t.midi; }
+    if (!onBeat) midi += 1;
+    return 440 * Math.pow(2, (midi - 69) / 12);
   }
 
   return {
-    init() {
-      if (ctx) return;
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
-    },
-    start() {
+    init() { if (ctx) return; ctx = new (window.AudioContext || window.webkitAudioContext)(); },
+    start(initialBpm = 128) {
+      if (!ctx) this.init();
       if (isRunning) return;
-      this.init();
       if (ctx.state === 'suspended') ctx.resume();
-      isRunning = true; stepIndex = 0;
-      nextStepTime = ctx.currentTime + 0.1;
-      scheduler();
+      bpm = initialBpm; isRunning = true; stepIndex = 0; currentBeat = 0;
+      nextStepTime = ctx.currentTime + 0.05; lastBeatAudioTime = nextStepTime;
+      schedulerTimer = setInterval(scheduler, SCHEDULER_MS);
     },
-    stop() { isRunning = false; clearTimeout(schedulerTimer); },
-    onBeat(cb) { beatCallbacks.push(cb); },
-    offBeat(cb) { beatCallbacks = beatCallbacks.filter(x => x !== cb); },
+    stop() {
+      if (!isRunning) return;
+      isRunning = false; clearInterval(schedulerTimer); schedulerTimer = null;
+    },
+    onBeat(cb)  { if (typeof cb === 'function' && !beatCallbacks.includes(cb)) beatCallbacks.push(cb); },
+    offBeat(cb) { beatCallbacks = beatCallbacks.filter(f => f !== cb); },
     getBeatProgress() {
       if (!ctx || !isRunning) return 0;
-      const beatDur = (60 / bpm / 4) * 4;
-      return Math.min(1, (ctx.currentTime - lastBeatAudioTime) / beatDur);
+      const spBeat = 60 / bpm;
+      const elapsed = ctx.currentTime - lastBeatAudioTime;
+      return Math.min(1, Math.max(0, elapsed / spBeat));
     },
-    isOnBeat() { return this.getBeatProgress() < 0.25; },
-    playAttackSound(onBeat, score) {
-      if (!ctx) return;
-      const t = ctx.currentTime;
-      const notes = [262, 294, 330, 392, 440];
-      const freq = notes[Math.min(Math.floor(score / 500), 4)] * (onBeat ? 2 : 1);
-      const o = ctx.createOscillator(), g = ctx.createGain();
-      o.connect(g); g.connect(ctx.destination);
-      o.frequency.value = freq; o.type = 'sine';
-      g.gain.setValueAtTime(onBeat ? 0.3 : 0.15, t);
-      g.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
-      o.start(t); o.stop(t + 0.15);
+    isOnBeat(windowMs = 100) {
+      if (!ctx || !isRunning) return false;
+      const spBeat = 60 / bpm;
+      const window = windowMs / 1000;
+      const elapsed = ctx.currentTime - lastBeatAudioTime;
+      return elapsed < window || (spBeat - elapsed) < window;
     },
-    playLaserSound(onBeat) {
+    playAttackSound(onBeat, score = 0) {
       if (!ctx) return;
+      const freq = getAttackFreq(score, onBeat);
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = 'square'; osc.frequency.value = freq;
+      osc.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(onBeat ? 0.3 : 0.2, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08);
+      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.09);
+    },
+    playLaserSound(onBeat, score = 0) {
+      if (!ctx) return;
+      const baseFreq = getAttackFreq(score, onBeat);
       const t = ctx.currentTime;
-      const o = ctx.createOscillator(), g = ctx.createGain();
-      o.connect(g); g.connect(ctx.destination);
-      o.type = 'sawtooth';
-      o.frequency.setValueAtTime(onBeat ? 880 : 440, t);
-      o.frequency.exponentialRampToValueAtTime(onBeat ? 220 : 110, t + 0.1);
-      g.gain.setValueAtTime(0.2, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
-      o.start(t); o.stop(t + 0.1);
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(baseFreq * (onBeat ? 2 : 1), t);
+      osc.frequency.exponentialRampToValueAtTime(baseFreq * (onBeat ? 2.5 : 1.2), t + 0.04);
+      osc.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(onBeat ? 0.4 : 0.25, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+      osc.start(t); osc.stop(t + 0.05);
+      if (onBeat) {
+        const sz = ctx.sampleRate * 0.03;
+        const buf = ctx.createBuffer(1, sz, ctx.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < sz; i++) d[i] = Math.random() * 2 - 1;
+        const src = ctx.createBufferSource(); src.buffer = buf;
+        const flt = ctx.createBiquadFilter(); flt.type = 'bandpass';
+        flt.frequency.value = 4000; flt.Q.value = 0.3;
+        const ng = ctx.createGain();
+        ng.gain.setValueAtTime(0.2, t);
+        ng.gain.exponentialRampToValueAtTime(0.001, t + 0.03);
+        src.connect(flt); flt.connect(ng); ng.connect(ctx.destination);
+        src.start(t); src.stop(t + 0.03);
+      }
     },
     playPowerupSound(type) {
       if (!ctx) return;
       const t = ctx.currentTime;
-      const seqs = { multiplier:[440,550,660], shield:[330,440,550,660], overclock:[220,330,440,550,660] };
-      (seqs[type] || [440]).forEach((freq, i) => {
-        const o = ctx.createOscillator(), g = ctx.createGain();
-        o.connect(g); g.connect(ctx.destination);
-        o.frequency.value = freq; o.type = 'sine';
-        const st = t + i * 0.08;
-        g.gain.setValueAtTime(0.25, st); g.gain.exponentialRampToValueAtTime(0.001, st + 0.15);
-        o.start(st); o.stop(st + 0.2);
-      });
+      if (type === 'multiplier' || type === 'beat_multiplier') {
+        [52, 55, 59].forEach((midi, i) => {
+          const osc = ctx.createOscillator(), g = ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+          const onset = t + i * 0.07;
+          osc.connect(g); g.connect(ctx.destination);
+          g.gain.setValueAtTime(0.0, onset);
+          g.gain.linearRampToValueAtTime(0.3, onset + 0.01);
+          g.gain.exponentialRampToValueAtTime(0.001, onset + 0.12);
+          osc.start(onset); osc.stop(onset + 0.13);
+        });
+      } else if (type === 'shield' || type === 'shield_overcharge') {
+        [40, 44, 47].forEach((midi) => {
+          const osc = ctx.createOscillator(), g = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+          osc.connect(g); g.connect(ctx.destination);
+          g.gain.setValueAtTime(0.25, t);
+          g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+          osc.start(t); osc.stop(t + 0.51);
+          const osc2 = ctx.createOscillator(), g2 = ctx.createGain();
+          osc2.type = 'sine';
+          osc2.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+          osc2.connect(g2); g2.connect(ctx.destination);
+          g2.gain.setValueAtTime(0.1, t + 0.12);
+          g2.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+          osc2.start(t + 0.12); osc2.stop(t + 0.51);
+        });
+      } else if (type === 'overclock') {
+        const osc = ctx.createOscillator(), g = ctx.createGain();
+        const wshape = ctx.createWaveShaper();
+        const curve = new Float32Array(256);
+        for (let i = 0; i < 256; i++) {
+          const x = (i * 2) / 256 - 1;
+          curve[i] = (Math.PI + 30) * x / (Math.PI + 30 * Math.abs(x));
+        }
+        wshape.curve = curve;
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(200, t);
+        osc.frequency.exponentialRampToValueAtTime(1200, t + 0.08);
+        osc.connect(wshape); wshape.connect(g); g.connect(ctx.destination);
+        g.gain.setValueAtTime(0.3, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+        osc.start(t); osc.stop(t + 0.11);
+      }
     },
     playHurtSound() {
       if (!ctx) return;
-      const t = ctx.currentTime;
-      const o = ctx.createOscillator(), g = ctx.createGain();
-      o.connect(g); g.connect(ctx.destination);
-      o.type = 'sawtooth';
-      o.frequency.setValueAtTime(200, t); o.frequency.exponentialRampToValueAtTime(50, t + 0.3);
-      g.gain.setValueAtTime(0.4, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
-      o.start(t); o.stop(t + 0.3);
-    }
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = 'sawtooth'; osc.frequency.value = 150;
+      osc.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.5, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.21);
+    },
+    getBPM() { return bpm; },
+    setBPM(v) { bpm = Math.max(60, Math.min(200, v)); },
+    get currentBeat() { return currentBeat; },
   };
 })();
 
