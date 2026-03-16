@@ -553,6 +553,11 @@ const G = {
   weapon: 0, weaponUnlocked: [true, false],
   // Beat-flash for HUD
   onBeatFlash: 0,
+  // THE SHAFT super weapon
+  shaftCooldown: 0,       // seconds remaining on cooldown (0 = ready)
+  shaftProj: null,        // active shaft projectile (or null)
+  shaftLabel: 0,          // "THE SHAFT" label fade timer
+  shaftShockwaveFlash: 0, // full-screen white flash timer (frames)
 };
 
 // ============================================================
@@ -935,6 +940,168 @@ function drawProjectiles() {
       gfx.restore();
     }
   });
+}
+
+
+// ============================================================
+// THE SHAFT — super weapon
+// ============================================================
+const SHAFT_COOLDOWN = 30;  // seconds
+const SHAFT_SPEED    = 200; // px/s
+
+function fireShaft() {
+  if (!G.started || G.over) return;
+  if (G.shaftCooldown > 0) return;
+  if (G.shaftProj) return; // already in flight
+  const p = G.player;
+  if (!p) return;
+
+  // Direction toward mouse
+  const dx = G.mouse.x - p.x, dy = G.mouse.y - p.y;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  const vx = (dx / len) * SHAFT_SPEED;
+  const vy = (dy / len) * SHAFT_SPEED;
+  const angle = Math.atan2(dy, dx) - Math.PI / 2; // rotated so "up" faces travel dir
+
+  G.shaftProj = { x: p.x, y: p.y, vx, vy, angle, stopFlight: null };
+  G.shaftCooldown = SHAFT_COOLDOWN;
+  G.shaftLabel = 1.5; // seconds to display label
+
+  // Audio
+  AudioEngine.playShaftFire();
+  G.shaftProj.stopFlight = AudioEngine.playShaftFlight();
+}
+
+function updateShaft(dt) {
+  // Cooldown
+  if (G.shaftCooldown > 0) G.shaftCooldown = Math.max(0, G.shaftCooldown - dt);
+  // Label fade
+  if (G.shaftLabel > 0) G.shaftLabel = Math.max(0, G.shaftLabel - dt);
+
+  const s = G.shaftProj;
+  if (!s) return;
+
+  s.x += s.vx * dt;
+  s.y += s.vy * dt;
+
+  // Kill enemies on contact
+  const SHAFT_W = 20, SHAFT_H = 60;
+  G.enemies.forEach(e => {
+    if (e.dead) return;
+    const dx = e.x - s.x, dy = e.y - s.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    // Approximate hitbox: half-diagonal of 20x60 rect ≈ 32px + enemy size
+    if (dist < e.size + 32) {
+      e.hp = 0;
+      e.dead = true;
+      onEnemyDeath(e);
+      // Purple explosion
+      spawnExplosion(e.x, e.y, '#cc00ff', e.size * 1.4);
+    }
+  });
+
+  // Check if off-screen
+  const margin = 80;
+  if (s.x < -margin || s.x > W + margin || s.y < -margin || s.y > H + margin) {
+    // Stop flight sound, trigger shockwave
+    if (s.stopFlight) s.stopFlight();
+    AudioEngine.playShaftShockwave();
+
+    // Shockwave: all remaining enemies lose 50% current HP
+    G.enemies.forEach(e => {
+      if (e.dead) return;
+      e.hp = Math.ceil(e.hp * 0.5);
+      e.hitFlash = 1;
+      spawnParticles(e.x, e.y, '#cc00ff', 10, 100, 0.4);
+      if (e.hp <= 0) { e.hp = 0; e.dead = true; onEnemyDeath(e); }
+    });
+
+    // Full-screen flash
+    G.shaftShockwaveFlash = 3; // frames
+
+    G.shaftProj = null;
+  }
+}
+
+function drawShaft() {
+  const s = G.shaftProj;
+  if (!s) return;
+
+  gfx.save();
+  gfx.translate(s.x, s.y);
+  gfx.rotate(s.angle);
+
+  // Glow
+  gfx.shadowBlur = 20;
+  gfx.shadowColor = '#cc00ff';
+
+  const w = 20, h = 60, r = 10; // rounded rect
+
+  // Purple gradient: dark core → bright purple → pink tip
+  const grad = gfx.createLinearGradient(0, -h / 2, 0, h / 2);
+  grad.addColorStop(0,   '#ff66ff'); // pink tip (top = leading edge after rotation)
+  grad.addColorStop(0.4, '#cc00ff'); // bright purple
+  grad.addColorStop(1,   '#4a0080'); // dark core
+
+  // Rounded rectangle body
+  gfx.beginPath();
+  gfx.moveTo(-w / 2 + r, -h / 2);
+  gfx.lineTo( w / 2 - r, -h / 2);
+  gfx.arcTo(  w / 2,     -h / 2,  w / 2,     -h / 2 + r, r);
+  gfx.lineTo( w / 2,      h / 2 - r);
+  gfx.arcTo(  w / 2,      h / 2,  w / 2 - r,  h / 2,     r);
+  gfx.lineTo(-w / 2 + r,  h / 2);
+  gfx.arcTo(-w / 2,       h / 2, -w / 2,      h / 2 - r, r);
+  gfx.lineTo(-w / 2,     -h / 2 + r);
+  gfx.arcTo(-w / 2,      -h / 2, -w / 2 + r, -h / 2,     r);
+  gfx.closePath();
+  gfx.fillStyle = grad;
+  gfx.fill();
+
+  // Two bumps near base
+  gfx.shadowBlur = 8;
+  gfx.fillStyle = '#cc00ff';
+  gfx.beginPath(); gfx.arc(-w / 2 - 4, h * 0.25, 8, 0, Math.PI * 2); gfx.fill();
+  gfx.beginPath(); gfx.arc( w / 2 + 4, h * 0.25, 8, 0, Math.PI * 2); gfx.fill();
+
+  // Retro scanlines at 30% opacity
+  gfx.shadowBlur = 0;
+  gfx.globalAlpha = 0.3;
+  gfx.strokeStyle = '#000';
+  gfx.lineWidth = 1;
+  for (let ly = -h / 2 + 4; ly < h / 2; ly += 6) {
+    gfx.beginPath();
+    gfx.moveTo(-w / 2 + 2, ly);
+    gfx.lineTo( w / 2 - 2, ly);
+    gfx.stroke();
+  }
+
+  gfx.restore();
+}
+
+function drawShaftLabel() {
+  // "THE SHAFT" center-screen label
+  if (G.shaftLabel <= 0) return;
+  const alpha = Math.min(1, G.shaftLabel / 0.5);
+  gfx.save();
+  gfx.globalAlpha = alpha;
+  gfx.fillStyle = '#cc00ff';
+  gfx.shadowColor = '#cc00ff';
+  gfx.shadowBlur = 30;
+  gfx.font = 'bold 64px Courier New';
+  gfx.textAlign = 'center';
+  gfx.fillText('THE SHAFT', W / 2, H / 2 - 20);
+  gfx.restore();
+}
+
+function drawShaftShockwaveFlash() {
+  if (G.shaftShockwaveFlash <= 0) return;
+  gfx.save();
+  gfx.globalAlpha = 0.6;
+  gfx.fillStyle = '#ffffff';
+  gfx.fillRect(0, 0, W, H);
+  gfx.restore();
+  G.shaftShockwaveFlash--;
 }
 
 // ============================================================
@@ -1861,6 +2028,25 @@ function drawHUD() {
     if (G.onBeatFlash < 0.01) G.onBeatFlash = 0;
   }
 
+  // SHAFT cooldown HUD (bottom right, above weapon)
+  {
+    const sx = W - 20, sy = H - 90;
+    gfx.textAlign = 'right';
+    if (G.shaftCooldown <= 0) {
+      gfx.fillStyle = '#cc00ff';
+      gfx.shadowColor = '#cc00ff';
+      gfx.shadowBlur = 12;
+      gfx.font = 'bold 13px Courier New';
+      gfx.fillText('\u26A1 SHAFT READY [F]', sx, sy);
+    } else {
+      gfx.fillStyle = '#888';
+      gfx.shadowBlur = 0;
+      gfx.font = 'bold 13px Courier New';
+      gfx.fillText('SHAFT: ' + Math.ceil(G.shaftCooldown) + 's', sx, sy);
+    }
+    gfx.shadowBlur = 0;
+  }
+
   // Kill progress bar (top center, small)
   if (!G.bossActive && !G.waveTransition) {
     const kw = 120, kh = 4;
@@ -1974,6 +2160,7 @@ function startGame() {
   G.weapon = 0; G.weaponUnlocked = [true, false];
   G.waveTransition = false; G.waveTimer = 0; G.waveKilled = 0; G.waveEnemies = 0; G.bossActive = false;
   G.beatFlash = 0; G.onBeatFlash = 0; G.bpmNotify = null;
+  G.shaftCooldown = 0; G.shaftProj = null; G.shaftLabel = 0; G.shaftShockwaveFlash = 0;
   G.player = createPlayer();
   G.mouse.x = W / 2; G.mouse.y = H * 0.8;
   initStars();
@@ -2014,14 +2201,18 @@ function loop(ts = 0) {
     updateProjectiles(dt);
     updatePowerups(dt);
     updateParticles(dt);
+    updateShaft(dt);
 
     drawParticles();
     drawEnemies();
     drawEnemyProjectiles();
     drawProjectiles();
+    drawShaft();
     drawPowerups();
     drawPlayer();
     drawFloatText();
+    drawShaftLabel();
+    drawShaftShockwaveFlash();
     drawHUD();
   }
 
@@ -2054,6 +2245,9 @@ window.addEventListener('keydown', e => {
   }
   if (e.key === 'e' || e.key === 'E') {
     if (G.weaponUnlocked[1]) G.weapon = 1;
+  }
+  if (e.key === 'f' || e.key === 'F') {
+    fireShaft();
   }
 });
 window.addEventListener('keyup', e => { G.keys[e.key] = false; });
