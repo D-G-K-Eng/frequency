@@ -1169,10 +1169,12 @@ const TIER_CONFIG = {
 
 function createEnemy(tier, x, y) {
   const cfg = TIER_CONFIG[tier];
+  // Speed scales with wave: +6% per wave, cap at 3x base
+  const speedMult = Math.min(3.0, 1 + (G.wave - 1) * 0.06);
   return {
     tier, x, y,
     hp: cfg.hp, maxHp: cfg.hp,
-    speed: cfg.speed, size: cfg.size,
+    speed: cfg.speed * speedMult, size: cfg.size,
     score: cfg.score, color: cfg.color,
     spriteName: cfg.name,
     dead: false, deathTimer: 0,
@@ -1187,11 +1189,14 @@ function createEnemy(tier, x, y) {
 }
 
 function createBoss(x, y) {
+  const bossNum = Math.floor(G.wave / 5);
+  const bossSpeedMult = Math.min(2.5, 1 + (bossNum - 1) * 0.2);
+  const bossHp = Math.round(800 * Math.min(4, 1 + (bossNum - 1) * 0.4));
   return {
     tier: 'boss', x, y,
-    hp: 800, maxHp: 800,
-    speed: 55, size: 70,
-    score: 2000, color: '#ff4400',
+    hp: bossHp, maxHp: bossHp,
+    speed: 55 * bossSpeedMult, size: 70,
+    score: 2000 * bossNum, color: '#ff4400',
     spriteName: 'boss',
     dead: false, deathTimer: 0,
     angle: 0, ringAngle: 0,
